@@ -36,18 +36,17 @@ Enhanced Accuracy Curves: The results show that our Dynamic Iterative strategy c
 ![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
 Strategic Sacrifice (Pruning): The transmission trace reveals that our algorithm intelligently "sacrifices" low-importance blocks (sending them at Level 1) to "save" time for high-importance blocks, ensuring they are sent at Level 3.
 
-==================================================
 REAL DATA TRACE (Deadline: 0.2s)
-==================================================
+
 APPROACH: Pure Adaptive
 Status: SUCCESS
 Sequence: (Imp:2, L:2) -> (Imp:4, L:2) -> (Imp:5, L:2) -> (Imp:2, L:2) -> (Imp:5, L:2) -> (Imp:5, L:2) -> (Imp:5, L:2) -> (Imp:4, L:2) -> (Imp:4, L:2) -> (Imp:4, L:2) -> (Imp:2, L:2) -> (Imp:5, L:2) -> (Imp:4, L:2) -> (Imp:4, L:2) -> (Imp:1, L:2) -> (Imp:2, L:2) -> (Imp:5, L:2) -> (Imp:5, L:2) -> (Imp:2, L:2) -> (Imp:1, L:2) -> (Imp:4, L:2) -> (Imp:5, L:2) -> (Imp:1, L:2) -> (Imp:2, L:2) -> (Imp:5, L:2) -> (Imp:5, L:2) -> (Imp:5, L:2) -> (Imp:3, L:2) -> (Imp:4, L:2) -> (Imp:3, L:2) -> (Imp:1, L:2) -> (Imp:3, L:3) -> (Imp:5, L:3) -> (Imp:3, L:3) -> (Imp:2, L:3) -> (Imp:2, L:3) -> (Imp:4, L:3) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:4, L:3)
 Final Score: 120.5
---------------------------------------------------
+
 APPROACH: Dynamic Iterative
 Status: SUCCESS
 Sequence: (Imp:2, L:1) -> (Imp:4, L:3) -> (Imp:5, L:3) -> (Imp:2, L:1) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:4, L:3) -> (Imp:4, L:3) -> (Imp:4, L:3) -> (Imp:2, L:1) -> (Imp:5, L:3) -> (Imp:4, L:2) -> (Imp:4, L:2) -> (Imp:1, L:1) -> (Imp:2, L:1) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:2, L:1) -> (Imp:1, L:1) -> (Imp:4, L:1) -> (Imp:5, L:3) -> (Imp:1, L:1) -> (Imp:2, L:1) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:5, L:3) -> (Imp:3, L:1) -> (Imp:4, L:2) -> (Imp:3, L:1) -> (Imp:1, L:1) -> (Imp:3, L:1) -> (Imp:5, L:3) -> (Imp:3, L:1) -> (Imp:2, L:1) -> (Imp:2, L:1) -> (Imp:4, L:2) -> (Imp:5, L:3) -> (Imp:5, L:2) -> (Imp:4, L:1)
 Final Score: 184.5
-==================================================
+
 
 
