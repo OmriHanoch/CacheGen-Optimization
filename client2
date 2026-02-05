@@ -1,0 +1,140 @@
+import socket
+import json
+import matplotlib.pyplot as plt
+import numpy as np
+
+def calculate_dynamic_step(remaining_blocks, time_left, network_speed, sizes):
+    num_rem = len(remaining_blocks)
+    current_plan = {i: "1" for i in range(num_rem)}
+    
+    def get_time(p):
+        return sum(sizes[p[idx]] for idx in range(num_rem)) / network_speed
+
+    if get_time(current_plan) > time_left:
+        return "1"
+
+    # Iterate by importance across ALL remaining blocks to find the best plan
+    for target_imp in range(5, 0, -1):
+        for i in range(num_rem):
+            if remaining_blocks[i]["importance"] == target_imp:
+                plan_copy = current_plan.copy()
+                plan_copy[i] = "3"
+                if get_time(plan_copy) <= time_left:
+                    current_plan[i] = "3"
+                    continue
+                
+                plan_copy[i] = "2"
+                if get_time(plan_copy) <= time_left:
+                    current_plan[i] = "2"
+                    continue
+                
+    return current_plan[0]
+
+def run_dynamic_iterative(found_blocks, user_deadline, network_speed, sizes, accuracies, log=False):
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    
+    for i in range(len(found_blocks)):
+        time_left = user_deadline - simulated_elapsed
+        level = calculate_dynamic_step(found_blocks[i:], time_left, network_speed, sizes)
+        
+        simulated_elapsed += (sizes[level] / network_speed)
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            history.append(f"(Imp:{imp}, L:{level})")
+            
+    if simulated_elapsed > user_deadline:
+        return (0, "FAILED") if log else 0
+    
+    return (total_score, history) if log else total_score
+
+def run_adaptive(found_blocks, user_deadline, network_speed, sizes, accuracies, log=False):
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    num_blocks = len(found_blocks)
+    
+    for i in range(num_blocks):
+        time_left = user_deadline - simulated_elapsed
+        max_bits = (time_left * network_speed) / (num_blocks - i) if time_left > 0 else 0
+        
+        if max_bits >= sizes["3"]: level = "3"
+        elif max_bits >= sizes["2"]: level = "2"
+        else: level = "1"
+        
+        simulated_elapsed += (sizes[level] / network_speed)
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            history.append(f"(Imp:{imp}, L:{level})")
+            
+    if simulated_elapsed > user_deadline:
+        return (0, "FAILED") if log else 0
+        
+    return (total_score, history) if log else total_score
+
+def main():
+    # --- Server Connection ---
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect(('127.0.0.1', 5005))
+    
+    network_speed = 1000000 
+    sizes = {"1": 2400, "2": 4000, "3": 8000}
+    accuracies = {"1": 0.3, "2": 0.5, "3": 2}
+
+    # Request real blocks from server
+    potential_hashes = [f"hash_block_{i}" for i in range(40)]
+    client_socket.send(json.dumps({"command": "CHECK_BATCH", "hashes": potential_hashes}).encode())
+    response = json.loads(client_socket.recv(1024 * 5).decode())
+    found_blocks = response["blocks"]
+    
+    print(f"Successfully retrieved {len(found_blocks)} blocks from server.")
+
+    # --- PART 1: THE GRAPH ---
+    deadlines = np.linspace(0.05, 0.35, 120)
+    adaptive_scores = [run_adaptive(found_blocks, dl, network_speed, sizes, accuracies) for dl in deadlines]
+    iterative_scores = [run_dynamic_iterative(found_blocks, dl, network_speed, sizes, accuracies) for dl in deadlines]
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(deadlines, adaptive_scores, label='Pure Adaptive', color='blue', alpha=0.5)
+    plt.plot(deadlines, iterative_scores, label='Dynamic Iterative', color='green', linewidth=2)
+    plt.title('Real-Time Accuracy Score vs. Deadline')
+    plt.xlabel('Deadline (seconds)')
+    plt.ylabel('Total Score')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # --- PART 2: THE TRACE ILLUSTRATION ---
+    specific_deadline = 0.2
+    score_adp, hist_adp = run_adaptive(found_blocks, specific_deadline, network_speed, sizes, accuracies, log=True)
+    score_ite, hist_ite = run_dynamic_iterative(found_blocks, specific_deadline, network_speed, sizes, accuracies, log=True)
+
+    client_socket.close()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+"""
+    print("\n" + "="*50)
+    print(f"REAL DATA TRACE (Deadline: {specific_deadline}s)")
+    print("="*50)
+    print(f"APPROACH: Pure Adaptive")
+    print(f"Status: {'SUCCESS' if score_adp > 0 else 'FAILED'}")
+    print(f"Sequence: {' -> '.join(hist_adp) if hist_adp != 'FAILED' else 'N/A'}")
+    print(f"Final Score: {score_adp}")
+    print("-" * 50)
+    print(f"APPROACH: Dynamic Iterative")
+    print(f"Status: {'SUCCESS' if score_ite > 0 else 'FAILED'}")
+    print(f"Sequence: {' -> '.join(hist_ite) if hist_ite != 'FAILED' else 'N/A'}")
+    print(f"Final Score: {score_ite}")
+    print("="*50)
+"""
