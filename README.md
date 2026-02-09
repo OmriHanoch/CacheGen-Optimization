@@ -59,7 +59,17 @@ Under zero-noise conditions, the Dynamic Iterative approach is expected to:
 1. Maintain zero failures due to precise, deterministic time-budgeting.
 2. Outperform the Pure Adaptive approach by intelligently prioritizing L3 quality for high-importance blocks while downscaling low-importance ones to L1.
 ![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
+## Analysis of Results: Baseline Scenario (Noise Type 1)
 
+The results from the zero-noise simulation confirm our initial hypotheses regarding the performance and behavior of both algorithms under stable network conditions.
+
+### Key Observations
+- Superior Utility: As expected, the Dynamic Iterative approach significantly outperforms the Pure Adaptive strategy across almost all tested deadlines.
+- Intelligent Prioritization: The iterative algorithm successfully maximizes the total score by prioritizing high-importance blocks for L3 quality while downscaling less critical data, whereas the adaptive approach remains constrained by its uniform resource allocation.
+- Deterministic Reliability: In this stable 1 Mbps environment, both algorithms show a clear "success threshold." Once the deadline is long enough to support at least L1 quality for all blocks, the failure rate drops to zero, as the predictable speed allows for perfect time-budgeting.
+
+### Conclusion
+These findings validate our baseline expectations: when network conditions are predictable, a dynamic, priority-aware optimization strategy is far more efficient than a simple uniform adaptation.
 
 
 
