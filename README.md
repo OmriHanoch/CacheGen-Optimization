@@ -95,7 +95,7 @@ The testing methodology remains consistent to ensure a fair comparison:
 This test represents a "Good Quality" link (like a stable Wi-Fi or Fiber connection) where the main challenge is not a total outage, but the accumulation of small delays that can lead to a deadline violation in high-load scenarios.
 
 
-![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
+![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/18780dce3dd133d4e2ee295215b4540595a26b42/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-09%20161226.png)
 
 
 ## Analysis of Results: Gaussian Variability (Noise Type 2)
@@ -135,7 +135,7 @@ This scenario simulates extreme network instability, where the bandwidth is high
 ### 4. Real-World Representation
 This test represents a "Stress Test" for real-time systems. It proves that in unstable environments, the ability to survive a worst-case scenario (Resilience) is often more valuable than the ability to maximize quality during best-case scenarios (Optimization).
 
-![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
+![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/18780dce3dd133d4e2ee295215b4540595a26b42/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-09%20162044.png)
 
 
 ## Analysis of Results: Bursty Traffic (Noise Type 3)
