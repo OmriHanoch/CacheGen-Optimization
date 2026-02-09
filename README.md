@@ -71,147 +71,114 @@ The results from the zero-noise simulation confirm our initial hypotheses regard
 ### Conclusion
 These findings validate our baseline expectations: when network conditions are predictable, a dynamic, priority-aware optimization strategy is far more efficient than a simple uniform adaptation.
 
+## Noise Scenario: Gaussian Variability (Noise Type 2)
+
+This scenario introduces stochastic variability to the network, moving beyond the idealized 1 Mbps constant speed to simulate common network jitter.
+
+### 1. Simulation of Network Jitter
+- Nature of Noise: We apply a Gaussian (Normal) distribution to the network speed.
+- Parameters: The speed fluctuates around the 1 Mbps base, with a standard deviation of 10% (100 Kbps).
+- Practical Meaning: This simulates a typical real-world connection where the bandwidth is relatively stable but suffers from constant, minor fluctuations due to interference or cross-traffic.
+
+### 2. Experimental Design
+The testing methodology remains consistent to ensure a fair comparison:
+- Dynamic Speed Updates: Unlike the baseline, the actual speed is recalculated after every block transmission.
+- Feedback Loop: The algorithms receive the "measured speed" from the previous block and must use it to estimate the time required for the next transmission.
+- Iterative Testing: 10 independent iterations with randomized importance levels to average out the impact of specific noise patterns.
+
+### 3. Expectations
+- Performance Margin: The Dynamic Iterative approach is still expected to lead in score due to its prioritization logic, but the gap may narrow.
+- Risk of Failure: We expect to see the first signs of "Hard Failures" (Score 0) at tight deadlines. Since the speed is no longer deterministic, the Dynamic Iterative algorithm might "over-promise" quality (L3) based on a high speed measurement, only to be penalized if the speed drops during the actual transmission.
+- Adaptive Resilience: The Pure Adaptive approach is expected to be more robust. By not aiming for maximum quality, it naturally maintains a larger time buffer, making it less sensitive to minor Gaussian fluctuations.
+
+### 4. Real-World Representation
+This test represents a "Good Quality" link (like a stable Wi-Fi or Fiber connection) where the main challenge is not a total outage, but the accumulation of small delays that can lead to a deadline violation in high-load scenarios.
 
 
-================================================================================
-REAL DATA TRACE (Deadline: 0.3282s)
-================================================================================
-
-APPROACH: Pure Adaptive
-Status: SUCCESS
-Sequence: Block 0: (Imp:3, L:3, Speed:1000Kbps, Time:0.0080s) -> Block 1: (Imp:1, L:3, Speed:1000Kbps, Time:0.0160s) -> Block 2: (Imp:3, L:3, Speed:1000Kbps, Time:0.0240s) -> Block 3: (Imp:1, L:3, Speed:1000Kbps, Time:0.0320s) -> Block 4: (Imp:3, L:3, Speed:1000Kbps, Time:0.0400s) -> Block 5: (Imp:2, L:3, Speed:1000Kbps, Time:0.0480s) -> Block 6: (Imp:4, L:3, Speed:1000Kbps, Time:0.0560s) -> Block 7: (Imp:2, L:3, Speed:1000Kbps, Time:0.0640s) -> Block 8: (Imp:5, L:3, Speed:1000Kbps, Time:0.0720s) -> Block 9: (Imp:3, L:3, Speed:1000Kbps, Time:0.0800s) -> Block 10: (Imp:5, L:1, Speed:100Kbps, Time:0.1040s) -> Block 11: (Imp:5, L:1, Speed:100Kbps, Time:0.1280s) -> Block 12: (Imp:1, L:2, Speed:1000Kbps, Time:0.1320s) -> Block 13: (Imp:2, L:2, Speed:1000Kbps, Time:0.1360s) -> Block 14: (Imp:1, L:2, Speed:1000Kbps, Time:0.1400s) -> Block 15: (Imp:1, L:2, Speed:1000Kbps, Time:0.1440s) -> Block 16: (Imp:4, L:2, Speed:1000Kbps, Time:0.1480s) -> Block 17: (Imp:5, L:2, Speed:1000Kbps, Time:0.1520s) -> Block 18: (Imp:3, L:3, Speed:1000Kbps, Time:0.1600s) -> Block 19: (Imp:5, L:3, Speed:1000Kbps, Time:0.1680s) -> Block 20: (Imp:3, L:3, Speed:1000Kbps, Time:0.1760s) -> Block 21: (Imp:4, L:1, Speed:100Kbps, Time:0.2000s) -> Block 22: (Imp:3, L:2, Speed:1000Kbps, Time:0.2040s) -> Block 23: (Imp:4, L:2, Speed:1000Kbps, Time:0.2080s) -> Block 24: (Imp:1, L:2, Speed:1000Kbps, Time:0.2120s) -> Block 25: (Imp:1, L:2, Speed:1000Kbps, Time:0.2160s) -> Block 26: (Imp:3, L:3, Speed:1000Kbps, Time:0.2240s) -> Block 27: (Imp:4, L:3, Speed:1000Kbps, Time:0.2320s) -> Block 28: (Imp:5, L:3, Speed:1000Kbps, Time:0.2400s) -> Block 29: (Imp:1, L:3, Speed:1000Kbps, Time:0.2480s) -> Block 30: (Imp:5, L:3, Speed:1000Kbps, Time:0.2560s) -> Block 31: (Imp:5, L:1, Speed:100Kbps, Time:0.2800s) -> Block 32: (Imp:5, L:2, Speed:1000Kbps, Time:0.2840s) -> Block 33: (Imp:5, L:2, Speed:1000Kbps, Time:0.2880s) -> Block 34: (Imp:1, L:2, Speed:1000Kbps, Time:0.2920s) -> Block 35: (Imp:4, L:2, Speed:1000Kbps, Time:0.2960s) -> Block 36: (Imp:4, L:3, Speed:1000Kbps, Time:0.3040s) -> Block 37: (Imp:4, L:3, Speed:1000Kbps, Time:0.3120s) -> Block 38: (Imp:2, L:3, Speed:1000Kbps, Time:0.3200s) -> Block 39: (Imp:3, L:3, Speed:1000Kbps, Time:0.3280s)
-Final Score: 162.7
-
-APPROACH: Dynamic Iterative
-Status: FAILED
-Sequence: Block 0: (Imp:3, L:3, Speed:1000Kbps, Time:0.0080s) -> Block 1: (Imp:1, L:3, Speed:1000Kbps, Time:0.0160s) -> Block 2: (Imp:3, L:3, Speed:1000Kbps, Time:0.0240s) -> Block 3: (Imp:1, L:3, Speed:1000Kbps, Time:0.0320s) -> Block 4: (Imp:3, L:3, Speed:1000Kbps, Time:0.0400s) -> Block 5: (Imp:2, L:3, Speed:1000Kbps, Time:0.0480s) -> Block 6: (Imp:4, L:3, Speed:1000Kbps, Time:0.0560s) -> Block 7: (Imp:2, L:3, Speed:1000Kbps, Time:0.0640s) -> Block 8: (Imp:5, L:1, Speed:100Kbps, Time:0.0880s) -> Block 9: (Imp:3, L:1, Speed:100Kbps, Time:0.1120s) -> Block 10: (Imp:5, L:3, Speed:1000Kbps, Time:0.1200s) -> Block 11: (Imp:5, L:3, Speed:1000Kbps, Time:0.1280s) -> Block 12: (Imp:1, L:3, Speed:1000Kbps, Time:0.1360s) -> Block 13: (Imp:2, L:3, Speed:1000Kbps, Time:0.1440s) -> Block 14: (Imp:1, L:3, Speed:1000Kbps, Time:0.1520s) -> Block 15: (Imp:1, L:2, Speed:1000Kbps, Time:0.1560s) -> Block 16: (Imp:4, L:3, Speed:1000Kbps, Time:0.1640s) -> Block 17: (Imp:5, L:3, Speed:1000Kbps, Time:0.1720s) -> Block 18: (Imp:3, L:1, Speed:100Kbps, Time:0.1960s) -> Block 19: (Imp:5, L:3, Speed:1000Kbps, Time:0.2040s) -> Block 20: (Imp:3, L:3, Speed:1000Kbps, Time:0.2120s) -> Block 21: (Imp:4, L:3, Speed:1000Kbps, Time:0.2200s) -> Block 22: (Imp:3, L:3, Speed:1000Kbps, Time:0.2280s) -> Block 23: (Imp:4, L:3, Speed:1000Kbps, Time:0.2360s) -> Block 24: (Imp:1, L:1, Speed:1000Kbps, Time:0.2384s) -> Block 25: (Imp:1, L:1, Speed:1000Kbps, Time:0.2408s) -> Block 26: (Imp:3, L:1, Speed:100Kbps, Time:0.2648s) -> Block 27: (Imp:4, L:2, Speed:1000Kbps, Time:0.2688s) -> Block 28: (Imp:5, L:3, Speed:1000Kbps, Time:0.2768s) -> Block 29: (Imp:1, L:1, Speed:1000Kbps, Time:0.2792s) -> Block 30: (Imp:5, L:3, Speed:1000Kbps, Time:0.2872s) -> Block 31: (Imp:5, L:3, Speed:1000Kbps, Time:0.2952s) -> Block 32: (Imp:5, L:3, Speed:1000Kbps, Time:0.3032s) -> Block 33: (Imp:5, L:3, Speed:1000Kbps, Time:0.3112s) -> Block 34: (Imp:1, L:1, Speed:100Kbps, Time:0.3352s) -> Block 35: (Imp:4, L:1, Speed:1000Kbps, Time:0.3376s) -> Block 36: (Imp:4, L:1, Speed:1000Kbps, Time:0.3400s) -> Block 37: (Imp:4, L:1, Speed:1000Kbps, Time:0.3424s) -> Block 38: (Imp:2, L:1, Speed:1000Kbps, Time:0.3448s) -> Block 39: (Imp:3, L:1, Speed:1000Kbps, Time:0.3472s)
-Final Score: 0
-================================================================================
+![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
 
 
-============================================================
-FAILURE COUNTS BY DEADLINE
-============================================================
-Deadline     Adaptive Failures    Iterative Failures
-------------------------------------------------------------
-0.1500       200                  200
-0.1534       200                  200
-0.1567       200                  200
-0.1601       200                  200
-0.1634       200                  200
-0.1668       200                  200
-0.1702       200                  200
-0.1735       200                  200
-0.1769       200                  200
-0.1803       200                  200
-0.1836       200                  200
-0.1870       200                  200
-0.1903       200                  200
-0.1937       200                  200
-0.1971       200                  200
-0.2004       200                  200
-0.2038       200                  200
-0.2071       200                  200
-0.2105       200                  200
-0.2139       200                  200
-0.2172       199                  200
-0.2206       199                  200
-0.2239       200                  200
-0.2273       194                  200
-0.2307       194                  200
-0.2340       188                  200
-0.2374       186                  200
-0.2408       185                  200
-0.2441       190                  200
-0.2475       178                  200
-0.2508       167                  200
-0.2542       167                  200
-0.2576       163                  200
-0.2609       161                  200
-0.2643       157                  200
-0.2676       146                  200
-0.2710       156                  198
-0.2744       157                  200
-0.2777       142                  199
-0.2811       148                  200
-0.2845       149                  200
-0.2878       142                  197
-0.2912       146                  199
-0.2945       143                  193
-0.2979       151                  199
-0.3013       150                  194
-0.3046       144                  196
-0.3080       140                  196
-0.3113       144                  194
-0.3147       146                  191
-0.3181       132                  191
-0.3214       147                  187
-0.3248       138                  192
-0.3282       141                  193
-0.3315       137                  187
-0.3349       140                  186
-0.3382       151                  186
-0.3416       150                  184
-0.3450       151                  179
-0.3483       152                  176
-0.3517       137                  171
-0.3550       133                  177
-0.3584       154                  168
-0.3618       140                  170
-0.3651       134                  157
-0.3685       147                  165
-0.3718       144                  162
-0.3752       135                  160
-0.3786       134                  136
-0.3819       140                  142
-0.3853       123                  133
-0.3887       119                  138
-0.3920       121                  118
-0.3954       106                  96
-0.3987       107                  120
-0.4021       92                   86
-0.4055       79                   73
-0.4088       90                   72
-0.4122       53                   47
-0.4155       59                   58
-0.4189       30                   33
-0.4223       30                   32
-0.4256       29                   36
-0.4290       21                   15
-0.4324       7                    4
-0.4357       5                    9
-0.4391       4                    1
-0.4424       1                    3
-0.4458       5                    2
-0.4492       0                    0
-0.4525       0                    0
-0.4559       0                    0
-0.4592       0                    0
-0.4626       0                    0
-0.4660       0                    0
-0.4693       0                    0
-0.4727       0                    0
-0.4761       0                    0
-0.4794       0                    0
-0.4828       0                    0
-0.4861       0                    0
-0.4895       0                    0
-0.4929       0                    0
-0.4962       0                    0
-0.4996       0                    0
-0.5029       0                    0
-0.5063       0                    0
-0.5097       0                    0
-0.5130       0                    0
-0.5164       0                    0
-0.5197       0                    0
-0.5231       0                    0
-0.5265       0                    0
-0.5298       0                    0
-0.5332       0                    0
-0.5366       0                    0
-0.5399       0                    0
-0.5433       0                    0
-0.5466       0                    0
-0.5500       0                    0
-============================================================
+## Analysis of Results: Gaussian Variability (Noise Type 2)
+
+The results from the Gaussian noise simulation confirm that minor fluctuations in network speed introduce a "risk factor" that specifically impacts optimization-heavy strategies.
+
+### Key Observations
+- Consistent Performance Lead: Despite the noise, the Dynamic Iterative approach maintains a higher average score for most deadlines. Its ability to prioritize high-importance blocks remains its core advantage.
+- The "Stability Gap" at Tight Deadlines: A critical shift occurs at deadlines between 0.10s and 0.15s. In this range, the Pure Adaptive approach actually achieves higher scores. This happens because the Adaptive approach is more conservative; it doesn't "over-commit" to high quality, allowing it to survive minor speed drops that cause the aggressive Iterative approach to fail and receive a zero score.
+- Convergence at High Deadlines: As the deadline increases beyond 0.35s, both algorithms converge toward the maximum possible score. With enough time buffer, even the most aggressive optimization can survive Gaussian jitter.
+
+### Conclusion
+These findings confirm our hypothesis: Gaussian noise penalizes "greedy" optimization. While the Dynamic Iterative algorithm is more efficient on average, the Pure Adaptive algorithm proves to be more reliable in high-pressure (tight deadline) scenarios where there is no room for error.
+
+
+
+## Noise Scenario: Bursty Traffic (Noise Type 3)
+
+This scenario simulates extreme network instability, where the bandwidth is high for most of the time but suffers from sudden, severe drops.
+
+### 1. Simulation of Bursty Conditions
+- Nature of Noise: The network speed follows a "Bursty" pattern rather than a smooth distribution.
+- Drop Severity: During a burst event, the capacity drops to 10% of the base speed (from 1 Mbps to 100 Kbps).
+- Duration and Frequency: The drops occur every 8-10 blocks and last for 1-2 blocks at a time.
+- Practical Meaning: This simulates real-world conditions like moving between cellular cells or sudden interference in a crowded wireless environment.
+
+### 2. Experimental Design
+- Instantaneous Feedback: The algorithms measure the speed after each block.
+- High-Risk Decision Making: The Dynamic Iterative approach must decide whether to "gamble" on high quality during stable periods, knowing a massive drop could be imminent.
+- Cumulative Delay: Because the drops are so severe (90% loss), any delay caused by a burst is difficult to recover from within a tight deadline.
+
+### 3. Expectations
+- The Optimization Paradox: We expect the Dynamic Iterative approach to suffer significantly. Its strategy of using up the "time budget" for high-importance blocks leaves it with no margin to handle a 90% speed drop.
+- Survival of the Simplest: The Pure Adaptive approach is expected to be the clear winner in terms of reliability. By maintaining a low-quality profile (L1/L2), it naturally builds a large "Time Buffer" that allows it to absorb the impact of a burst without failing the deadline.
+- Bimodal Results: At very short deadlines, we expect both algorithms to fail (score 0) as the average speed under bursty conditions becomes mathematically insufficient to send 40 blocks.
+
+### 4. Real-World Representation
+This test represents a "Stress Test" for real-time systems. It proves that in unstable environments, the ability to survive a worst-case scenario (Resilience) is often more valuable than the ability to maximize quality during best-case scenarios (Optimization).
+
+![image_alt](https://github.com/OmriHanoch/CacheGen-Optimization/blob/main/%D7%A6%D7%99%D7%9C%D7%95%D7%9D%20%D7%9E%D7%A1%D7%9A%202026-02-04%20132335.png?raw=true)
+
+
+## Analysis of Results: Bursty Traffic (Noise Type 3)
+
+The Bursty Traffic simulation provides the most significant results of the study, demonstrating a complete reversal of the performance trends observed in stable environments.
+
+### Key Observations
+- Failure of Optimization: In this scenario, the Dynamic Iterative approach (Green line) consistently underperforms the Pure Adaptive approach (Blue line) for deadlines between 0.20s and 0.40s. Its "greedy" strategy of maximizing quality during high-speed periods leaves it with zero time-margin, causing it to fail entirely when a 90% speed drop occurs.
+- The Resilience Advantage: The Pure Adaptive approach proves far more reliable. Because it does not attempt to maximize quality, it inherently maintains a "Time Buffer." This buffer allows it to absorb the impact of sudden network drops, leading to successful transmissions (and thus higher average scores) where the Dynamic approach results in a zero score.
+- Late-Stage Convergence: Only after the deadline exceeds 0.45s—providing enough time to survive multiple bursts regardless of strategy—does the Dynamic Iterative approach regain its lead by optimizing the remaining "safe" time.
+Convergence Analysis: The Recovery Point
+- Late-Stage Convergence: A key feature of the Bursty Traffic graph is the point where the lines finally meet (around 0.45s - 0.50s). 
+- Resource Saturation: This represents the moment where the Deadline becomes large enough to absorb even multiple worst-case bursts. At this point, the "Time Buffer" advantage of the Adaptive approach is no longer necessary, as there is enough time for both algorithms to send all blocks at maximum quality (L3).
+
+### Final Conclusion: Optimization vs. Robustness
+The three stages of this experiment confirm a fundamental engineering trade-off:
+1. Stable Environments: Dynamic optimization is superior, providing maximum utility with zero risk.
+2. Moderate Jitter: Optimization remains effective but begins to show vulnerability at the edges.
+3. Volatile (Bursty) Environments: Simplistic, conservative strategies (Adaptive) are superior to complex optimization. Resilience and "margin for error" become more valuable than raw efficiency.
+
+The results confirm our final hypothesis: An algorithm that is "perfectly" tuned for the present is often the most vulnerable to a sudden change in the future.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
