@@ -1,0 +1,22 @@
+
+
+### Analysis of the Trace: The Optimization Trap
+The real-time trace reveals a classic "Greedy Failure" in the Dynamic Iterative algorithm:
+- Greedy Commitment: At Block 2, the Dynamic algorithm detected a temporary speed increase (1075 Kbps) and committed to a higher quality level (L2). 
+- Margin Depletion: This decision consumed critical time reserves, reducing the "Safety Margin" to nearly zero.
+- Jitter Sensitivity: When the network speed inevitably dipped at Block 4 (805 Kbps), the Dynamic algorithm had no remaining buffer to absorb the delay.
+- The Adaptive Advantage: By remaining at L1 despite the speed increase, the Pure Adaptive approach maintained a 2x larger safety margin, allowing it to survive network fluctuations that proved fatal to the optimized approach.
+================================================================================
+REAL DATA TRACE (Deadline: 0.0259s)
+================================================================================
+
+APPROACH: Pure Adaptive
+Status: SUCCESS
+Sequence: Block 0: (Imp:1, L:1, Speed:1000Kbps, Time:0.0024s, RemainL1:0.0216s, Margin:0.0019s) -> Block 1: (Imp:1, L:1, Speed:896Kbps, Time:0.0051s, RemainL1:0.0214s, Margin:-0.0006s) -> Block 2: (Imp:5, L:1, Speed:1075Kbps, Time:0.0073s, RemainL1:0.0156s, Margin:0.0030s) -> Block 3: (Imp:1, L:1, Speed:1094Kbps, Time:0.0095s, RemainL1:0.0132s, Margin:0.0032s) -> Block 4: (Imp:4, L:1, Speed:805Kbps, Time:0.0125s, RemainL1:0.0149s, Margin:-0.0015s) -> Block 5: (Imp:5, L:1, Speed:870Kbps, Time:0.0152s, RemainL1:0.0110s, Margin:-0.0004s) -> Block 6: (Imp:5, L:1, Speed:1013Kbps, Time:0.0176s, RemainL1:0.0071s, Margin:0.0012s) -> Block 7: (Imp:3, L:1, Speed:968Kbps, Time:0.0201s, RemainL1:0.0050s, Margin:0.0008s) -> Block 8: (Imp:3, L:1, Speed:998Kbps, Time:0.0225s, RemainL1:0.0024s, Margin:0.0010s) -> Block 9: (Imp:3, L:1, Speed:915Kbps, Time:0.0251s, RemainL1:0.0000s, Margin:0.0008s)
+Final Score: 9.3
+
+APPROACH: Dynamic Iterative
+Status: FAILED
+Sequence: Block 0: (Imp:1, L:1, Speed:1000Kbps, Time:0.0024s, RemainL1:0.0216s, Margin:0.0019s) -> Block 1: (Imp:1, L:1, Speed:896Kbps, Time:0.0051s, RemainL1:0.0214s, Margin:-0.0006s) -> Block 2: (Imp:5, L:2, Speed:1075Kbps, Time:0.0088s, RemainL1:0.0156s, Margin:0.0015s) -> Block 3: (Imp:1, L:1, Speed:1094Kbps, Time:0.0110s, RemainL1:0.0132s, Margin:0.0017s) -> Block 4: (Imp:4, L:1, Speed:805Kbps, Time:0.0140s, RemainL1:0.0149s, Margin:-0.0030s) -> Block 5: (Imp:5, L:1, Speed:870Kbps, Time:0.0167s, RemainL1:0.0110s, Margin:-0.0019s) -> Block 6: (Imp:5, L:1, Speed:1013Kbps, Time:0.0191s, RemainL1:0.0071s, Margin:-0.0003s) -> Block 7: (Imp:3, L:1, Speed:968Kbps, Time:0.0216s, RemainL1:0.0050s, Margin:-0.0006s) -> Block 8: (Imp:3, L:1, Speed:998Kbps, Time:0.0240s, RemainL1:0.0024s, Margin:-0.0005s) -> Block 9: (Imp:3, L:1, Speed:915Kbps, Time:0.0266s, RemainL1:0.0000s, Margin:-0.0007s)
+Final Score: 0
+================================================================================
