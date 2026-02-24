@@ -2,13 +2,16 @@ import socket
 import json
 import matplotlib.pyplot as plt
 import numpy as np
+import sys
+import signal
+import random
 
-def calculate_dynamic_step(remaining_blocks, time_left, network_speed, sizes):
+def calculate_dynamic_step(remaining_blocks, time_left, measured_speed, sizes):
     num_rem = len(remaining_blocks)
     current_plan = {i: "1" for i in range(num_rem)}
     
     def get_time(p):
-        return sum(sizes[p[idx]] for idx in range(num_rem)) / network_speed
+        return sum(sizes[p[idx]] / measured_speed for idx in range(num_rem))
 
     if get_time(current_plan) > time_left:
         return "1"
@@ -30,111 +33,1849 @@ def calculate_dynamic_step(remaining_blocks, time_left, network_speed, sizes):
                 
     return current_plan[0]
 
-def run_dynamic_iterative(found_blocks, user_deadline, network_speed, sizes, accuracies, log=False):
+def next_bursty_speed(base_speed, burst_state, rng):
+    """Every ~4-6 blocks, drop to 10% capacity for 1-2 blocks."""
+    if burst_state["remaining"] > 0:
+        burst_state["remaining"] -= 1
+        return base_speed * 0.1
+
+    burst_state["until_next"] -= 1
+    if burst_state["until_next"] <= 0:
+        duration = int(rng.integers(1, 3))  # 1-2 blocks
+        burst_state["remaining"] = duration - 1  # current block already dropped
+        burst_state["until_next"] = int(rng.integers(8, 11))  # 8-10 blocks
+        return base_speed * 0.1
+
+    return base_speed
+
+def run_dynamic_iterative(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, burst_state=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()  # Use a copy so we don't modify the original
     simulated_elapsed = 0
     total_score = 0
     history = []
+    measured_speed = base_speed  # Start with assumed 1Mbps
     
     for i in range(len(found_blocks)):
         time_left = user_deadline - simulated_elapsed
-        level = calculate_dynamic_step(found_blocks[i:], time_left, network_speed, sizes)
+        level = calculate_dynamic_step(found_blocks[i:], time_left, measured_speed, sizes)
         
-        simulated_elapsed += (sizes[level] / network_speed)
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
         imp = found_blocks[i]["importance"]
         total_score += (imp * accuracies[level])
         
         if log:
-            history.append(f"(Imp:{imp}, L:{level})")
-            
-    if simulated_elapsed > user_deadline:
-        return (0, "FAILED") if log else 0
+            # Calculate time to send remaining blocks after current at level 1
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, len(found_blocks) - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, Speed:{measured_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, Remain-Time:{time_for_remaining_level1:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed
+        if variable_speed and i < len(found_blocks) - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
     
-    return (total_score, history) if log else total_score
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
 
-def run_adaptive(found_blocks, user_deadline, network_speed, sizes, accuracies, log=False):
+def run_dynamic_iterative_moving_avg(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, window_size=10, burst_state=None):
+    """Dynamic Iterative with moving average of recent speeds"""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()  # Use a copy so we don't modify the original
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    measured_speed = base_speed
+    speeds_history = [base_speed] * window_size  # Initialize with base speed
+    
+    for i in range(len(found_blocks)):
+        time_left = user_deadline - simulated_elapsed
+        # Use moving average instead of current speed
+        avg_speed = sum(speeds_history) / len(speeds_history)
+        level = calculate_dynamic_step(found_blocks[i:], time_left, avg_speed, sizes)
+        
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, len(found_blocks) - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, AvgSpeed:{avg_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, Remain-Time:{time_for_remaining_level1:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed
+        if variable_speed and i < len(found_blocks) - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+            
+            # Update moving average
+            speeds_history.pop(0)
+            speeds_history.append(measured_speed)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_dynamic_iterative_safety_margin(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, safety_margin_percent=10, burst_state=None):
+    """Dynamic Iterative with safety margin (percentage of remaining time)"""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()  # Use a copy so we don't modify the original
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    measured_speed = base_speed
+    
+    for i in range(len(found_blocks)):
+        time_left = user_deadline - simulated_elapsed
+        # Apply safety margin
+        safety_buffer = (time_left * safety_margin_percent) / 100
+        safe_time_left = time_left - safety_buffer
+        
+        level = calculate_dynamic_step(found_blocks[i:], safe_time_left, measured_speed, sizes)
+        
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, len(found_blocks) - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, Speed:{measured_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, Remain-Time:{time_for_remaining_level1:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed
+        if variable_speed and i < len(found_blocks) - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_dynamic_iterative_dynamic_safety(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, safety_margin_percent=10, burst_state=None):
+    """Dynamic Iterative with DYNAMIC safety margin that decreases as we progress through blocks.
+    margin = base_percent * (remaining_blocks / total_blocks)
+    - At start: full margin (e.g., 10%)
+    - At end: near 0% margin (use all remaining time)"""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    measured_speed = base_speed
+    total_blocks = len(found_blocks)
+    
+    for i in range(total_blocks):
+        time_left = user_deadline - simulated_elapsed
+        # Dynamic safety margin: decreases as we progress
+        remaining_count = total_blocks - i
+        dynamic_margin = safety_margin_percent * (remaining_count / total_blocks)
+        safety_buffer = (time_left * dynamic_margin) / 100
+        safe_time_left = time_left - safety_buffer
+        
+        level = calculate_dynamic_step(found_blocks[i:], safe_time_left, measured_speed, sizes)
+        
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, total_blocks - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, DynSM:{dynamic_margin:.1f}%, Speed:{measured_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed
+        if variable_speed and i < total_blocks - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_dynamic_iterative_reverse_safety(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, safety_margin_percent=10, burst_state=None):
+    """Dynamic Iterative with REVERSE dynamic safety margin that INCREASES as we progress.
+    margin = base_percent * (i / total_blocks)
+    - At start: near 0% margin (aggressive, use time freely)
+    - At end: full margin (conservative, less time to recover)"""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    measured_speed = base_speed
+    total_blocks = len(found_blocks)
+    
+    for i in range(total_blocks):
+        time_left = user_deadline - simulated_elapsed
+        # Reverse dynamic safety margin: increases as we progress
+        progress = (i + 1) / total_blocks  # 1/n at start, 1.0 at end
+        dynamic_margin = safety_margin_percent * progress
+        safety_buffer = (time_left * dynamic_margin) / 100
+        safe_time_left = time_left - safety_buffer
+        
+        level = calculate_dynamic_step(found_blocks[i:], safe_time_left, measured_speed, sizes)
+        
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, total_blocks - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, RevSM:{dynamic_margin:.1f}%, Speed:{measured_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed
+        if variable_speed and i < total_blocks - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_dynamic_iterative_channel_aware_sm(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, burst_state=None, expected_speed=None, ma_window=10, max_sm=90, min_sm=30):
+    """Dynamic Iterative with Channel-Aware Adaptive Safety Margin.
+    Uses a moving average of recent speeds to estimate pressure:
+    1. Calculate time to send all remaining blocks at L1 using MA speed
+    2. Compare to remaining time → slack_ratio (0 = no slack, 1 = lots)
+    3. SM = min_sm + (max_sm - min_sm) * (1 - slack_ratio)
+    
+    - Lots of slack (time_left >> time_for_L1): SM ≈ min_sm → aggressive, send high quality
+    - No slack (time_left ≈ time_for_L1):      SM ≈ max_sm → conservative, protect deadline
+    
+    expected_speed: initial MA seed (800K for bursty, 1M otherwise)"""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()
+    if expected_speed is None:
+        expected_speed = base_speed
+    
+    simulated_elapsed = 0
+    total_score = 0
+    history = []
+    measured_speed = base_speed
+    total_blocks = len(found_blocks)
+    
+    # Initialize MA with expected_speed (pessimistic for bursty)
+    speeds_history = [expected_speed] * ma_window
+    
+    for i in range(total_blocks):
+        time_left = user_deadline - simulated_elapsed
+        
+        # Moving average of recent speeds
+        ma_speed = sum(speeds_history) / len(speeds_history)
+        
+        # Conservative planning speed: use the worse of current and MA
+        planning_speed = min(measured_speed, ma_speed)
+        
+        # How long to send ALL remaining blocks at L1, according to planning speed?
+        remaining_count = total_blocks - i
+        time_for_all_L1 = (remaining_count * sizes["1"]) / planning_speed
+        
+        # Slack = extra time beyond the minimum needed
+        slack = time_left - time_for_all_L1
+        # slack_ratio: what fraction of remaining time is "extra" (0 = no slack, 1 = lots)
+        slack_ratio = max(0.0, min(slack / time_left, 1.0)) if time_left > 0 else 0.0
+        
+        # Pressure-based SM: low slack → high SM (conservative), high slack → low SM (aggressive)
+        adaptive_sm = min_sm + (max_sm - min_sm) * (1.0 - slack_ratio)
+        
+        # Apply safety margin
+        safety_buffer = (time_left * adaptive_sm) / 100
+        safe_time_left = time_left - safety_buffer
+        
+        # Use conservative planning speed (min of current and MA)
+        level = calculate_dynamic_step(found_blocks[i:], safe_time_left, planning_speed, sizes)
+        
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
+        imp = found_blocks[i]["importance"]
+        total_score += (imp * accuracies[level])
+        
+        if log:
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, total_blocks - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, SM:{adaptive_sm:.1f}%, Slack:{slack_ratio:.2f}, MA:{ma_speed/1000:.0f}K, Speed:{measured_speed/1000:.0f}K, Time:{simulated_elapsed:.4f}s, Margin:{remaining_margin:.4f}s)")
+        
+        # After transmission, measure the actual network speed and update MA
+        if variable_speed and i < total_blocks - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+            
+            # Update moving average
+            speeds_history.pop(0)
+            speeds_history.append(measured_speed)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_adaptive(found_blocks, user_deadline, sizes, accuracies, log=False, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, burst_state=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()  # Use a copy so we don't modify the original
     simulated_elapsed = 0
     total_score = 0
     history = []
     num_blocks = len(found_blocks)
+    measured_speed = base_speed  # Start with assumed 1Mbps
     
     for i in range(num_blocks):
         time_left = user_deadline - simulated_elapsed
-        max_bits = (time_left * network_speed) / (num_blocks - i) if time_left > 0 else 0
+        max_bits = (time_left * measured_speed) / (num_blocks - i) if time_left > 0 else 0
         
         if max_bits >= sizes["3"]: level = "3"
         elif max_bits >= sizes["2"]: level = "2"
         else: level = "1"
         
-        simulated_elapsed += (sizes[level] / network_speed)
+        transmission_time = sizes[level] / measured_speed
+        simulated_elapsed += transmission_time
         imp = found_blocks[i]["importance"]
         total_score += (imp * accuracies[level])
         
         if log:
-            history.append(f"(Imp:{imp}, L:{level})")
-            
-    if simulated_elapsed > user_deadline:
-        return (0, "FAILED") if log else 0
+            # Calculate time to send remaining blocks after current at level 1
+            time_left_after = user_deadline - simulated_elapsed
+            remaining_block_count = max(0, num_blocks - (i + 1))
+            time_for_remaining_level1 = (remaining_block_count * sizes["1"]) / measured_speed
+            remaining_margin = time_left_after - time_for_remaining_level1
+            history.append(f"Block {i}: (Imp:{imp}, L:{level}, Speed:{measured_speed/1000:.0f}Kbps, Time:{simulated_elapsed:.4f}s, RemainL1:{time_for_remaining_level1:.4f}s, Margin:{remaining_margin:.4f}s)")
         
-    return (total_score, history) if log else total_score
+        # After transmission, measure the actual network speed
+        if variable_speed and i < num_blocks - 1:
+            if speed_model == "bursty":
+                measured_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                measured_speed = max(base_speed * 0.5, base_speed + noise)
+    
+    failed = simulated_elapsed > user_deadline
+    if log:
+        return (total_score if not failed else 0, history, failed)
+    return (0 if failed else total_score, failed, simulated_elapsed)
+
+def run_oracle_optimal(found_blocks, user_deadline, sizes, accuracies, variable_speed=False, base_speed=1000000, speed_model="gaussian", rng=None, burst_state=None):
+    """Compute the best possible score with perfect foreknowledge of all network speeds (hindsight optimal).
+    Uses Dynamic Programming (Pareto-front) to find the truly optimal quality level assignment
+    for each block, given known speeds and deadline constraint.
+    
+    Algorithm: Multiple-choice knapsack solved via Pareto-front DP.
+    - Baseline: all blocks at level 1 (minimum time).
+    - Budget: deadline minus total L1 time.
+    - For each block, 3 options: stay L1 (0 extra), upgrade to L2, upgrade to L3.
+    - Maintain Pareto-optimal frontier of (extra_time, extra_score) — guarantees exact optimum."""
+    if rng is None:
+        rng = np.random.default_rng()
+    if burst_state is None:
+        burst_state = {"until_next": int(rng.integers(8, 11)), "remaining": 0}
+    else:
+        burst_state = burst_state.copy()
+
+    n = len(found_blocks)
+
+    # Step 1: Determine the actual speed at each block position (same RNG sequence as other algorithms)
+    actual_speeds = []
+    current_speed = base_speed
+    for i in range(n):
+        actual_speeds.append(current_speed)
+        if variable_speed and i < n - 1:
+            if speed_model == "bursty":
+                current_speed = next_bursty_speed(base_speed, burst_state, rng)
+            else:
+                noise = rng.normal(0, base_speed * 0.1)
+                current_speed = max(base_speed * 0.5, base_speed + noise)
+
+    # Step 2: Check if even all level-1 exceeds deadline
+    min_time = sum(sizes["1"] / actual_speeds[i] for i in range(n))
+    if min_time > user_deadline:
+        return 0, True, min_time
+
+    # Step 3: Dynamic Programming — Pareto-front approach for exact optimal
+    budget = user_deadline - min_time
+    base_score = sum(found_blocks[i]["importance"] * accuracies["1"] for i in range(n))
+
+    # Build upgrade options per block: (extra_time, extra_score) relative to L1
+    block_options = []
+    for i in range(n):
+        imp = found_blocks[i]["importance"]
+        speed = actual_speeds[i]
+        opts = [
+            (0.0, 0.0),  # Stay at L1 (no extra cost)
+            ((sizes["2"] - sizes["1"]) / speed, imp * (accuracies["2"] - accuracies["1"])),  # Upgrade to L2
+            ((sizes["3"] - sizes["1"]) / speed, imp * (accuracies["3"] - accuracies["1"])),  # Upgrade to L3
+        ]
+        block_options.append(opts)
+
+    # Pareto-front DP: maintain list of (cumulative_extra_time, cumulative_extra_score)
+    # Invariant: sorted by time ascending, scores strictly increasing (non-dominated)
+    pareto = [(0.0, 0.0)]
+
+    for opts in block_options:
+        new_points = []
+        for (t, s) in pareto:
+            for (dt, ds) in opts:
+                nt = t + dt
+                if nt <= budget + 1e-12:  # float tolerance
+                    new_points.append((nt, s + ds))
+
+        # Build new Pareto front: sort by time, keep only strictly increasing scores
+        new_points.sort()
+        pruned = []
+        best_score = -1.0
+        for (t, s) in new_points:
+            if s > best_score + 1e-12:
+                pruned.append((t, s))
+                best_score = s
+        pareto = pruned if pruned else [(0.0, 0.0)]
+
+    best_extra = max(s for (_, s) in pareto)
+    total_score = base_score + best_extra
+    return total_score, False, user_deadline
+
+def generate_random_blocks(num_blocks=10):
+    """Generate random blocks with importance levels"""
+    blocks = []
+    for i in range(num_blocks):
+        blocks.append({
+            "hash": f"hash_block_{i}",
+            "importance": random.randint(1, 5)
+        })
+    return blocks
+
+def plot_variance(deadlines, avg_scores, std_scores, color, variance_display):
+    """Helper function to plot variance in different styles"""
+    if variance_display == "bands":
+        plt.fill_between(deadlines, avg_scores - std_scores, avg_scores + std_scores, 
+                        color=color, alpha=0.15)
+    elif variance_display == "errorbars":
+        plt.errorbar(deadlines, avg_scores, yerr=std_scores, fmt='none', 
+                    ecolor=color, elinewidth=1, alpha=0.3, capsize=2)
+    elif variance_display == "dashed":
+        plt.plot(deadlines, avg_scores - std_scores, '--', color=color, alpha=0.3, linewidth=1)
+        plt.plot(deadlines, avg_scores + std_scores, '--', color=color, alpha=0.3, linewidth=1)
+    elif variance_display == "minmax":
+        # For minmax, we need min and max instead of std
+        # This will be handled separately in the calling code
+        pass
+
+
+def signal_handler(sig, frame):
+    """Handle CTRL+C gracefully"""
+    print("\n\nExecution stopped by user (CTRL+C)")
+    sys.exit(0)
 
 def main():
-    # --- Server Connection ---
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.connect(('127.0.0.1', 5005))
+    # Register signal handler for CTRL+C
+    signal.signal(signal.SIGINT, signal_handler)
     
-    network_speed = 1000000 
-    sizes = {"1": 2400, "2": 4000, "3": 8000}
-    accuracies = {"1": 0.3, "2": 0.5, "3": 2}
-
-    # Request real blocks from server
-    potential_hashes = [f"hash_block_{i}" for i in range(40)]
-    client_socket.send(json.dumps({"command": "CHECK_BATCH", "hashes": potential_hashes}).encode())
-    response = json.loads(client_socket.recv(1024 * 5).decode())
-    found_blocks = response["blocks"]
+    # --- Parse command line arguments ---
+    noise_type = 1
+    deadline_start = 0.00
+    deadline_end = 0.15
+    num_blocks = 10
+    trace_deadline = None
+    log_only = False
+    num_block_sets = 10
+    num_iterations = 20
+    ma_window_size = 10
+    ma_window_sizes = "1,2,3,4,5,6"  # Default window sizes for comparison
+    safety_margin_percent = 10
+    compare_safety_margins = False
+    compare_ma_windows = False
+    compare_dynamic_safety = False
+    compare_channel_aware = False
+    ca_configs = "5-90"  # Channel-Aware configs: "min_sm-max_sm,..." e.g. "5-90,10-80,15-60"
+    show_variance = False
+    variance_display = "bands"  # bands, errorbars, dashed, minmax
+    show_failure_rate = False
+    save_pdf = False
     
-    print(f"Successfully retrieved {len(found_blocks)} blocks from server.")
-
-    # --- PART 1: THE GRAPH ---
-    deadlines = np.linspace(0.05, 0.35, 120)
-    adaptive_scores = [run_adaptive(found_blocks, dl, network_speed, sizes, accuracies) for dl in deadlines]
-    iterative_scores = [run_dynamic_iterative(found_blocks, dl, network_speed, sizes, accuracies) for dl in deadlines]
-
-    plt.figure(figsize=(10, 6))
-    plt.plot(deadlines, adaptive_scores, label='Pure Adaptive', color='blue', alpha=0.5)
-    plt.plot(deadlines, iterative_scores, label='Dynamic Iterative', color='green', linewidth=2)
-    plt.title('Real-Time Accuracy Score vs. Deadline')
-    plt.xlabel('Deadline (seconds)')
-    plt.ylabel('Total Score')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    if len(sys.argv) > 1:
+        try:
+            for arg in sys.argv[1:]:
+                if "=" in arg:
+                    key, value = arg.split("=")
+                    key = key.strip()
+                    value = value.strip()
+                    if key == "noise_type":
+                        noise_type = int(value)
+                    elif key == "deadline_start":
+                        deadline_start = float(value)
+                    elif key == "deadline_end":
+                        deadline_end = float(value)
+                    elif key == "num_blocks":
+                        num_blocks = int(value)
+                    elif key == "trace_deadline":
+                        trace_deadline = float(value)
+                    elif key == "log_only":
+                        log_only = value.lower() in {"1", "true", "yes"}
+                    elif key == "num_block_sets":
+                        num_block_sets = int(value)
+                    elif key == "num_iterations":
+                        num_iterations = int(value)
+                    elif key == "ma_window_size":
+                        ma_window_size = int(value)
+                    elif key == "ma_window_sizes":
+                        ma_window_sizes = value
+                    elif key == "safety_margin_percent":
+                        safety_margin_percent = int(value)
+                    elif key == "compare_safety_margins":
+                        compare_safety_margins = value.lower() in {"1", "true", "yes"}
+                    elif key == "compare_ma_windows":
+                        compare_ma_windows = value.lower() in {"1", "true", "yes"}
+                    elif key == "compare_dynamic_safety":
+                        compare_dynamic_safety = value.lower() in {"1", "true", "yes"}
+                    elif key == "compare_channel_aware":
+                        compare_channel_aware = value.lower() in {"1", "true", "yes"}
+                    elif key == "ca_configs":
+                        ca_configs = value
+                    elif key == "show_variance":
+                        show_variance = value.lower() in {"1", "true", "yes"}
+                    elif key == "variance_display":
+                        variance_map = {"1": "bands", "2": "errorbars", "3": "dashed", "4": "minmax",
+                                       "bands": "bands", "errorbars": "errorbars", "dashed": "dashed", "minmax": "minmax"}
+                        variance_display = variance_map.get(value.lower(), "bands")
+                    elif key == "show_failure_rate":
+                        show_failure_rate = value.lower() in {"1", "true", "yes"}
+                    elif key == "save_pdf":
+                        save_pdf = value.lower() in {"1", "true", "yes"}
+                    else:
+                        print(f"Unknown argument: {key}")
+                        return
+                else:
+                    noise_type = int(arg)
+        except ValueError:
+            print("Invalid argument. Usage:")
+            print("  python client2.py ")
+            print("  python client2.py 3")
+            print("  python client2.py noise_type=1 deadline_start=0.05 deadline_end=0.2 num_blocks=15 trace_deadline=0.12 log_only=true num_block_sets=5 num_iterations=10 ma_window_size=5 safety_margin_percent=15")
+            print("\nArguments:")
+            print("  noise_type: 1 (no noise), 2 (gaussian), 3 (bursty) [default: 1]")
+            print("  deadline_start: start of deadline range [default: 0.00]")
+            print("  deadline_end: end of deadline range [default: 0.15]")
+            print("  num_blocks: number of blocks to generate [default: 10]")
+            print("  trace_deadline: specific deadline for trace display [default: midpoint]")
+            print("  log_only: run only trace output (true/false) [default: false]")
+            print("  num_block_sets: how many different random block sets to test [default: 10]")
+            print("  num_iterations: how many noise iterations per block set [default: 20]")
+            print("  ma_window_size: moving average window size [default: 10]")
+            print("  ma_window_sizes: window sizes to test in compare mode, comma-separated (e.g., 1,2,3,4,5,6) [default: 1,2,3,4,5,6]")
+            print("  safety_margin_percent: safety margin percentage of remaining time [default: 10]")
+            print("  compare_safety_margins: compare 10 different safety margins (2.5%-25%) [default: false]")
+            print("  compare_ma_windows: compare 6 different MA window sizes (1-6) [default: false]")
+            print("  compare_dynamic_safety: compare dynamic vs static safety margins side-by-side [default: false]")
+            print("  compare_channel_aware: compare Channel-Aware configs from ca_configs [default: false]")
+            print("  ca_configs: Channel-Aware min_sm-max_sm pairs, comma-separated (e.g., 5-90,10-80,15-60) [default: 5-90]")
+            print("  show_variance: show standard deviation on graph (true/false) [default: false]")
+            print("  variance_display: how to display variance - 1(bands)|2(errorbars)|3(dashed)|4(minmax) [default: 1]")
+            print("  show_failure_rate: show failure rate graph (true/false) [default: false]")
+            print("  save_pdf: save all graphs as PDF files (true/false) [default: false]")
+            return
     
-    # --- PART 2: THE TRACE ILLUSTRATION ---
-    specific_deadline = 0.2
-    score_adp, hist_adp = run_adaptive(found_blocks, specific_deadline, network_speed, sizes, accuracies, log=True)
-    score_ite, hist_ite = run_dynamic_iterative(found_blocks, specific_deadline, network_speed, sizes, accuracies, log=True)
+    try:
+        base_network_speed = 1000000 #1Mbps in bits per second 
+        sizes = {"1": 2400, "2": 4000, "3": 8000}
+        accuracies = {"1": 0.3, "2": 0.5, "3": 2}
 
-    client_socket.close()
-    plt.show()
+        print(f"Running with noise type: {noise_type}")
+        print("(Press CTRL+C to stop)\n")
+
+        deadlines = None
+        if not log_only:
+            # --- PART 1: THE GRAPH ---
+            deadlines = np.linspace(deadline_start, deadline_end, 120)
+            
+            if compare_safety_margins:
+                # Compare 10 different safety margins
+                safety_margins_to_test = [8 * (i + 1) for i in range(10)]  # 2.5%, 5%, 7.5%, ..., 25%
+                all_margin_results = {}  # {margin_percent: (iterative_sm_scores, label)}
+                # Track failures for compare_safety_margins mode
+                all_failure_counts_by_margin = {}
+                
+                # Initialize failure tracking for all margins
+                for margin in safety_margins_to_test:
+                    all_failure_counts_by_margin[margin] = {round(dl, 4): 0 for dl in deadlines}
+                
+                # Oracle tracking for safety margins mode
+                all_oracle_scores_sm = []
+                oracle_failure_counts_sm = {round(dl, 4): 0 for dl in deadlines}
+                
+                print(f"Running {num_block_sets} block sets, testing all {len(safety_margins_to_test)} safety margins per set...")
+                
+                for ordering in range(num_block_sets):
+                    print(f"\n{'='*60}")
+                    print(f"Block Set {ordering + 1}/{num_block_sets}")
+                    print(f"{'='*60}")
+                    new_blocks = generate_random_blocks(num_blocks)
+                    
+                    # Compute oracle optimal for this block set (independent of safety margin)
+                    if noise_type == 1:
+                        oracle_scores_local = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            oracle_scores_local.append(oracle_score)
+                            if oracle_failed:
+                                oracle_failure_counts_sm[round(dl, 4)] += 1
+                        all_oracle_scores_sm.append(np.array(oracle_scores_local))
+                    else:
+                        oracle_iter_list = []
+                        for iteration in range(num_iterations):
+                            oracle_scores_iter = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_oracle_base = np.random.default_rng(seed)
+                                burst_state_shared_o = {"until_next": int(rng_oracle_base.integers(8, 11)), "remaining": 0}
+                                rng_oracle = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_oracle, burst_state=burst_state_shared_o)
+                                else:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_oracle, burst_state=burst_state_shared_o)
+                                oracle_scores_iter.append(oracle_score)
+                                if oracle_failed:
+                                    oracle_failure_counts_sm[round(dl, 4)] += 1
+                            oracle_iter_list.append(oracle_scores_iter)
+                        all_oracle_scores_sm.append(np.mean(oracle_iter_list, axis=0))
+                    
+                    for current_margin in safety_margins_to_test:
+                        print(f"  Safety Margin: {current_margin}%")
+                        
+                        if current_margin not in all_margin_results:
+                            all_margin_results[current_margin] = []
+                        
+                        failure_counts_iterative_sm = all_failure_counts_by_margin[current_margin]
+                        
+                        if noise_type == 1:
+                            iter_sm_scores = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                # No randomness needed - deterministic execution
+                                iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, safety_margin_percent=current_margin)
+                                iter_sm_scores.append(iter_sm_score)
+                                dl_rounded = round(dl, 4)
+                                if iter_sm_failed:
+                                    failure_counts_iterative_sm[dl_rounded] += 1
+                            all_margin_results[current_margin].append(np.array(iter_sm_scores))
+                        else:
+                            iter_sm_scores_list = []
+                            
+                            for iteration in range(num_iterations):
+                                print(f"    Sub-iteration {iteration + 1}/{num_iterations}...", end="\r")
+                                iter_sm_scores = []
+                                
+                                for dl_idx, dl in enumerate(deadlines):
+                                    seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                    rng_shared = np.random.default_rng(seed)
+                                    burst_state_shared = {"until_next": int(rng_shared.integers(8, 11)), "remaining": 0}
+                                    
+                                    rng_shared4 = np.random.default_rng(seed)
+                                    
+                                    if noise_type == 3:
+                                        iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_shared4, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                    else:
+                                        iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_shared4, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                    
+                                    iter_sm_scores.append(iter_sm_score)
+                                    dl_rounded = round(dl, 4)
+                                    if iter_sm_failed:
+                                        failure_counts_iterative_sm[dl_rounded] += 1
+                                
+                                iter_sm_scores_list.append(iter_sm_scores)
+                            
+                            all_margin_results[current_margin].append(np.mean(iter_sm_scores_list, axis=0))
+                            print("    Completed!                  ")
+                
+                # Print failure statistics for compare_safety_margins
+                print("\n" + "="*100)
+                print("FAILURE COUNTS BY DEADLINE (Safety Margin Comparison Mode)")
+                print("="*100)
+                for current_margin in sorted(all_failure_counts_by_margin.keys()):
+                    print(f"\nSafety Margin: {current_margin}%")
+                    print(f"{'Deadline':<12} {'Failures':<10}")
+                    print("-"*22)
+                    failure_counts = all_failure_counts_by_margin[current_margin]
+                    for idx, dl in enumerate(sorted(failure_counts.keys())):
+                        if idx % 5 == 0:  # Print every 5th deadline
+                            print(f"{dl:<12.4f} {failure_counts[dl]:<10}")
+                print("="*100 + "\n")
+                
+                # Plot all 10 margins (averaging across all block sets)
+                plt.figure(figsize=(14, 7))
+                colors = plt.cm.viridis(np.linspace(0, 1, 10))
+                for idx, margin in enumerate(sorted(all_margin_results.keys())):
+                    scores_list = all_margin_results[margin]  # List of arrays, one per block_set
+                    avg_scores = np.mean(scores_list, axis=0)  # Average across block sets
+                    plt.plot(deadlines, avg_scores, label=f"SM {margin}%", color=colors[idx], linewidth=2)
+                    
+                    # Add variance if enabled
+                    if show_variance:
+                        if variance_display == "minmax":
+                            min_scores = np.min(scores_list, axis=0)
+                            max_scores = np.max(scores_list, axis=0)
+                            plt.fill_between(deadlines, min_scores, max_scores, color=colors[idx], alpha=0.15)
+                        else:
+                            std_scores = np.std(scores_list, axis=0)
+                            plot_variance(deadlines, avg_scores, std_scores, colors[idx], variance_display)
+                
+                # Add oracle optimal line
+                oracle_avg_sm = np.mean(all_oracle_scores_sm, axis=0)
+                plt.plot(deadlines, oracle_avg_sm, label='Optimal (Oracle)', color='black', linestyle='--', linewidth=2.5)
+                
+                plt.title(f'Safety Margin Comparison (2.5% - 25%)\nNoise: {noise_type}, Blocks: {num_blocks}, Iterations: {num_iterations}, Variance: {variance_display}')
+                plt.xlabel('Deadline (seconds)')
+                plt.ylabel('Total Score')
+                plt.legend(loc='best')
+                plt.grid(True, alpha=0.3)
+                
+                # Display the plot
+                if save_pdf:
+                    pdf_name = f'safety_margin_comparison_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                    plt.savefig(pdf_name, bbox_inches='tight')
+                    print(f"Saved: {pdf_name}")
+                plt.show()
+                print("\nSafety Margin Comparison plot displayed.")
+                
+                # --- FAILURE RATE GRAPH FOR SAFETY MARGINS ---
+                if show_failure_rate:
+                    plt.figure(figsize=(14, 7))
+                    total_runs_per_margin = num_block_sets * (num_iterations if noise_type != 1 else 1)
+                    
+                    for idx, margin in enumerate(sorted(all_failure_counts_by_margin.keys())):
+                        failure_counts = all_failure_counts_by_margin[margin]
+                        ordered_deadlines = sorted(failure_counts.keys())
+                        failure_rates = [failure_counts[dl] / total_runs_per_margin * 100 for dl in ordered_deadlines]
+                        
+                        colors = plt.cm.viridis(np.linspace(0, 1, 10))
+                        plt.plot(ordered_deadlines, failure_rates, label=f"SM {margin}%", color=colors[idx], linewidth=2, marker='o', markersize=3)
+                    
+                    # Add oracle failure rate
+                    oracle_ordered_dl = sorted(oracle_failure_counts_sm.keys())
+                    oracle_fr = [oracle_failure_counts_sm[dl] / total_runs_per_margin * 100 for dl in oracle_ordered_dl]
+                    plt.plot(oracle_ordered_dl, oracle_fr, label='Optimal (Oracle)', color='black', linestyle='--', linewidth=2.5, marker='x', markersize=4)
+                    
+                    plt.title(f'Safety Margin - Failure Rate vs. Deadline\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}')
+                    plt.xlabel('Deadline (seconds)')
+                    plt.ylabel('Failure Rate (%)')
+                    plt.ylim([0, 105])
+                    plt.legend(loc='best', fontsize=8)
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    if save_pdf:
+                        pdf_name = f'safety_margin_failure_rate_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                        plt.savefig(pdf_name, bbox_inches='tight')
+                        print(f"Saved: {pdf_name}")
+                    plt.show()
+                    print("Safety Margin Failure Rate plot displayed.")
+            
+            elif compare_ma_windows:
+                # Compare different MA window sizes
+                ma_window_sizes_to_test = [int(x.strip()) for x in ma_window_sizes.split(",")]
+                all_window_results = {w: [] for w in ma_window_sizes_to_test}  # {window_size: list of score arrays}
+                # Track failures for compare_ma_windows mode
+                all_failure_counts_by_window = {w: {round(dl, 4): 0 for dl in deadlines} for w in ma_window_sizes_to_test}
+                
+                # Oracle tracking for MA windows mode
+                all_oracle_scores_ma = []
+                oracle_failure_counts_ma = {round(dl, 4): 0 for dl in deadlines}
+                
+                print(f"Running {num_block_sets} block sets, testing all {len(ma_window_sizes_to_test)} MA window sizes per set...")
+                
+                for ordering in range(num_block_sets):
+                    print(f"\n{'='*60}")
+                    print(f"Block Set {ordering + 1}/{num_block_sets}")
+                    print(f"{'='*60}")
+                    new_blocks = generate_random_blocks(num_blocks)
+                    
+                    # Compute oracle optimal for this block set (independent of window size)
+                    if noise_type == 1:
+                        oracle_scores_local = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            oracle_scores_local.append(oracle_score)
+                            if oracle_failed:
+                                oracle_failure_counts_ma[round(dl, 4)] += 1
+                        all_oracle_scores_ma.append(np.array(oracle_scores_local))
+                    else:
+                        oracle_iter_list = []
+                        for iteration in range(num_iterations):
+                            oracle_scores_iter = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_oracle_base = np.random.default_rng(seed)
+                                burst_state_shared_o = {"until_next": int(rng_oracle_base.integers(8, 11)), "remaining": 0}
+                                rng_oracle = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_oracle, burst_state=burst_state_shared_o)
+                                else:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_oracle, burst_state=burst_state_shared_o)
+                                oracle_scores_iter.append(oracle_score)
+                                if oracle_failed:
+                                    oracle_failure_counts_ma[round(dl, 4)] += 1
+                            oracle_iter_list.append(oracle_scores_iter)
+                        all_oracle_scores_ma.append(np.mean(oracle_iter_list, axis=0))
+                    
+                    if noise_type == 1:
+                        # Deterministic mode: test all window sizes on same deadlines
+                        iter_ma_scores_by_window = {w: [] for w in ma_window_sizes_to_test}
+                        
+                        for dl_idx, dl in enumerate(deadlines):
+                            for current_window in ma_window_sizes_to_test:
+                                iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, window_size=current_window)
+                                iter_ma_scores_by_window[current_window].append(iter_ma_score)
+                                dl_rounded = round(dl, 4)
+                                if iter_ma_failed:
+                                    all_failure_counts_by_window[current_window][dl_rounded] += 1
+                        
+                        for current_window in ma_window_sizes_to_test:
+                            all_window_results[current_window].append(np.array(iter_ma_scores_by_window[current_window]))
+                    else:
+                        # Noisy mode: ensure all windows get same RNG/burst_state per deadline
+                        iter_ma_scores_by_window = {w: [] for w in ma_window_sizes_to_test}
+                        
+                        for iteration in range(num_iterations):
+                            print(f"  Sub-iteration {iteration + 1}/{num_iterations}...", end="\r")
+                            iter_ma_scores_per_window = {w: [] for w in ma_window_sizes_to_test}
+                            
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                # Create RNG and burst_state ONCE per deadline
+                                rng_base = np.random.default_rng(seed)
+                                burst_state_base = {"until_next": int(rng_base.integers(8, 11)), "remaining": 0}
+                                
+                                # Test all window sizes with SAME RNG and burst_state
+                                for current_window in ma_window_sizes_to_test:
+                                    rng_window = np.random.default_rng(seed)
+                                    burst_state_window = burst_state_base.copy()
+                                    
+                                    if noise_type == 3:
+                                        iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_window, window_size=current_window, burst_state=burst_state_window)
+                                    else:
+                                        iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_window, window_size=current_window, burst_state=burst_state_window)
+                                    
+                                    iter_ma_scores_per_window[current_window].append(iter_ma_score)
+                                    dl_rounded = round(dl, 4)
+                                    if iter_ma_failed:
+                                        all_failure_counts_by_window[current_window][dl_rounded] += 1
+                            
+                            for current_window in ma_window_sizes_to_test:
+                                iter_ma_scores_by_window[current_window].append(iter_ma_scores_per_window[current_window])
+                        
+                        for current_window in ma_window_sizes_to_test:
+                            all_window_results[current_window].append(np.mean(iter_ma_scores_by_window[current_window], axis=0))
+                        
+                        print("  Completed!                  ")
+                
+                # Print failure statistics for compare_ma_windows
+                print("\n" + "="*100)
+                print("FAILURE COUNTS BY DEADLINE (MA Window Size Comparison Mode)")
+                print("="*100)
+                for current_window in sorted(all_failure_counts_by_window.keys()):
+                    print(f"\nMA Window Size: {current_window}")
+                    print(f"{'Deadline':<12} {'Failures':<10}")
+                    print("-"*22)
+                    failure_counts = all_failure_counts_by_window[current_window]
+                    for idx, dl in enumerate(sorted(failure_counts.keys())):
+                        if idx % 5 == 0:  # Print every 5th deadline
+                            print(f"{dl:<12.4f} {failure_counts[dl]:<10}")
+                print("="*100 + "\n")
+                
+                # Plot all window sizes (averaging across all block sets)
+                plt.figure(figsize=(14, 7))
+                colors = plt.cm.viridis(np.linspace(0, 1, len(ma_window_sizes_to_test)))
+                for idx, window_sz in enumerate(sorted(all_window_results.keys())):
+                    scores_list = all_window_results[window_sz]  # List of arrays, one per block_set
+                    avg_scores = np.mean(scores_list, axis=0)  # Average across block sets
+                    plt.plot(deadlines, avg_scores, label=f"Window {window_sz}", color=colors[idx], linewidth=2)
+                    
+                    # Add variance if enabled
+                    if show_variance:
+                        if variance_display == "minmax":
+                            min_scores = np.min(scores_list, axis=0)
+                            max_scores = np.max(scores_list, axis=0)
+                            plt.fill_between(deadlines, min_scores, max_scores, color=colors[idx], alpha=0.15)
+                        else:
+                            std_scores = np.std(scores_list, axis=0)
+                            plot_variance(deadlines, avg_scores, std_scores, colors[idx], variance_display)
+                
+                # Add oracle optimal line
+                oracle_avg_ma = np.mean(all_oracle_scores_ma, axis=0)
+                plt.plot(deadlines, oracle_avg_ma, label='Optimal (Oracle)', color='black', linestyle='--', linewidth=2.5)
+                
+                plt.title(f'MA Window Comparison {tuple(ma_window_sizes_to_test)}\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iterations: {num_iterations}, Variance: {variance_display}')
+                plt.xlabel('Deadline (seconds)')
+                plt.ylabel('Total Score')
+                plt.legend(loc='best')
+                plt.grid(True, alpha=0.3)
+                
+                # Display the plot
+                if save_pdf:
+                    pdf_name = f'ma_window_comparison_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                    plt.savefig(pdf_name, bbox_inches='tight')
+                    print(f"Saved: {pdf_name}")
+                plt.show()
+                print("\nMA Window Size Comparison plot displayed.")
+                
+                # --- FAILURE RATE GRAPH FOR MA WINDOWS ---
+                if show_failure_rate:
+                    plt.figure(figsize=(14, 7))
+                    total_runs_per_window = num_block_sets * (num_iterations if noise_type != 1 else 1)
+                    
+                    for idx, window_sz in enumerate(sorted(all_failure_counts_by_window.keys())):
+                        failure_counts = all_failure_counts_by_window[window_sz]
+                        ordered_deadlines = sorted(failure_counts.keys())
+                        failure_rates = [failure_counts[dl] / total_runs_per_window * 100 for dl in ordered_deadlines]
+                        
+                        colors = plt.cm.viridis(np.linspace(0, 1, len(ma_window_sizes_to_test)))
+                        plt.plot(ordered_deadlines, failure_rates, label=f"Window {window_sz}", color=colors[idx], linewidth=2, marker='o', markersize=3)
+                    
+                    # Add oracle failure rate
+                    oracle_ordered_dl = sorted(oracle_failure_counts_ma.keys())
+                    oracle_fr = [oracle_failure_counts_ma[dl] / total_runs_per_window * 100 for dl in oracle_ordered_dl]
+                    plt.plot(oracle_ordered_dl, oracle_fr, label='Optimal (Oracle)', color='black', linestyle='--', linewidth=2.5, marker='x', markersize=4)
+                    
+                    plt.title(f'MA Window Size - Failure Rate vs. Deadline\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}')
+                    plt.xlabel('Deadline (seconds)')
+                    plt.ylabel('Failure Rate (%)')
+                    plt.ylim([0, 105])
+                    plt.legend(loc='best')
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    if save_pdf:
+                        pdf_name = f'ma_window_failure_rate_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                        plt.savefig(pdf_name, bbox_inches='tight')
+                        print(f"Saved: {pdf_name}")
+                    plt.show()
+                    print("MA Window Failure Rate plot displayed.")
+            
+            elif compare_channel_aware:
+                # --- Compare Channel-Aware configs only ---
+                ca_configs_list = []
+                for cfg in ca_configs.split(","):
+                    parts = cfg.strip().split("-")
+                    ca_configs_list.append((int(parts[0]), int(parts[1])))
+                
+                all_ca_results = {cfg: [] for cfg in ca_configs_list}
+                all_oracle_scores_ca = []
+                all_adaptive_results_ca = []
+                ca_expected = 800000 if noise_type == 3 else base_network_speed
+                
+                print(f"Comparing {len(ca_configs_list)} Channel-Aware configs: {['CA({}-{})'.format(c[0],c[1]) for c in ca_configs_list]}")
+                print(f"Running {num_block_sets} block sets, {num_iterations} iterations each...\n")
+                
+                for ordering in range(num_block_sets):
+                    print(f"{'='*60}")
+                    print(f"Block Set {ordering + 1}/{num_block_sets}")
+                    print(f"{'='*60}")
+                    new_blocks = generate_random_blocks(num_blocks)
+                    
+                    # Oracle
+                    if noise_type == 1:
+                        oracle_local = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            o_score, o_fail, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            oracle_local.append(o_score)
+                        all_oracle_scores_ca.append(np.array(oracle_local))
+                    else:
+                        oracle_iters = []
+                        for iteration in range(num_iterations):
+                            oracle_iter = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_ob = np.random.default_rng(seed)
+                                bs_o = {"until_next": int(rng_ob.integers(8, 11)), "remaining": 0}
+                                rng_o = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    o_score, o_fail, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_o, burst_state=bs_o)
+                                else:
+                                    o_score, o_fail, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_o, burst_state=bs_o)
+                                oracle_iter.append(o_score)
+                            oracle_iters.append(oracle_iter)
+                        all_oracle_scores_ca.append(np.mean(oracle_iters, axis=0))
+                    
+                    # Adaptive (baseline reference)
+                    if noise_type == 1:
+                        adp_scores = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            a_score, a_fail, _ = run_adaptive(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            adp_scores.append(a_score)
+                        all_adaptive_results_ca.append(np.array(adp_scores))
+                    else:
+                        adp_iters = []
+                        for iteration in range(num_iterations):
+                            adp_iter = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_ab = np.random.default_rng(seed)
+                                bs_a = {"until_next": int(rng_ab.integers(8, 11)), "remaining": 0}
+                                rng_a = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    a_score, a_fail, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_a, burst_state=bs_a)
+                                else:
+                                    a_score, a_fail, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_a, burst_state=bs_a)
+                                adp_iter.append(a_score)
+                            adp_iters.append(adp_iter)
+                        all_adaptive_results_ca.append(np.mean(adp_iters, axis=0))
+                    
+                    # All CA configs
+                    for ca_cfg in ca_configs_list:
+                        ca_min_sm, ca_max_sm = ca_cfg
+                        print(f"  CA({ca_min_sm}-{ca_max_sm})...")
+                        if noise_type == 1:
+                            ca_scores = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                c_score, c_fail, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, expected_speed=ca_expected, min_sm=ca_min_sm, max_sm=ca_max_sm)
+                                ca_scores.append(c_score)
+                            all_ca_results[ca_cfg].append(np.array(ca_scores))
+                        else:
+                            ca_iters = []
+                            for iteration in range(num_iterations):
+                                ca_iter = []
+                                for dl_idx, dl in enumerate(deadlines):
+                                    seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                    rng_cb = np.random.default_rng(seed)
+                                    bs_c = {"until_next": int(rng_cb.integers(8, 11)), "remaining": 0}
+                                    rng_c = np.random.default_rng(seed)
+                                    if noise_type == 3:
+                                        c_score, c_fail, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_c, burst_state=bs_c, expected_speed=ca_expected, min_sm=ca_min_sm, max_sm=ca_max_sm)
+                                    else:
+                                        c_score, c_fail, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_c, burst_state=bs_c, expected_speed=ca_expected, min_sm=ca_min_sm, max_sm=ca_max_sm)
+                                    ca_iter.append(c_score)
+                                ca_iters.append(ca_iter)
+                            all_ca_results[ca_cfg].append(np.mean(ca_iters, axis=0))
+                
+                # --- Results ---
+                oracle_avg = np.mean(all_oracle_scores_ca, axis=0)
+                adaptive_avg = np.mean(all_adaptive_results_ca, axis=0)
+                
+                print(f"\n{'='*60}")
+                print("CHANNEL-AWARE CONFIG COMPARISON")
+                print(f"{'='*60}")
+                print(f"  {'Config':<16} {'Total Score':>12}")
+                print(f"  {'-'*28}")
+                best_cfg = None
+                best_total = -1
+                for ca_cfg in ca_configs_list:
+                    ca_avg = np.mean(all_ca_results[ca_cfg], axis=0)
+                    total = np.sum(ca_avg)
+                    print(f"  CA({ca_cfg[0]}-{ca_cfg[1]}){'':>{10-len(str(ca_cfg[0]))-len(str(ca_cfg[1]))}} {total:>12.1f}")
+                    if total > best_total:
+                        best_total = total
+                        best_cfg = ca_cfg
+                print(f"  {'-'*28}")
+                print(f"  {'Adaptive':<16} {np.sum(adaptive_avg):>12.1f}")
+                print(f"  {'Oracle':<16} {np.sum(oracle_avg):>12.1f}")
+                print(f"\n  >>> Best: CA({best_cfg[0]}-{best_cfg[1]}) with score {best_total:.1f}")
+                print(f"{'='*60}\n")
+                
+                # --- Plot ---
+                plt.figure(figsize=(14, 7))
+                ca_colors = plt.cm.tab10(np.linspace(0, 1, max(len(ca_configs_list), 10)))
+                for idx, ca_cfg in enumerate(ca_configs_list):
+                    ca_avg = np.mean(all_ca_results[ca_cfg], axis=0)
+                    lw = 3.0 if ca_cfg == best_cfg else 2.0
+                    plt.plot(deadlines, ca_avg, label=f'CA({ca_cfg[0]}-{ca_cfg[1]})', color=ca_colors[idx], linewidth=lw)
+                    if show_variance:
+                        ca_std = np.std(all_ca_results[ca_cfg], axis=0)
+                        plt.fill_between(deadlines, ca_avg - ca_std, ca_avg + ca_std, color=ca_colors[idx], alpha=0.1)
+                plt.plot(deadlines, adaptive_avg, label='Adaptive', color='gray', linewidth=1.5, linestyle=':', alpha=0.7)
+                plt.plot(deadlines, oracle_avg, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                plt.title(f'Channel-Aware Config Comparison\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}')
+                plt.xlabel('Deadline (seconds)')
+                plt.ylabel('Total Score')
+                plt.legend(loc='best', fontsize=9)
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+                if save_pdf:
+                    cfg_str = '_'.join([f'{c[0]}-{c[1]}' for c in ca_configs_list])
+                    pdf_name = f'channel_aware_comparison_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}_{cfg_str}.pdf'
+                    plt.savefig(pdf_name, bbox_inches='tight')
+                    print(f"Saved: {pdf_name}")
+                plt.show()
+                print("Channel-Aware comparison displayed.")
+            
+            elif compare_dynamic_safety:
+                # Compare different base percentages for dynamic safety margin
+                if noise_type == 3:
+                    dynamic_safety_margins_to_test = [15 * i for i in range(7)]  # 0%, 15%, 30%, 45%, 60%, 75%, 90%
+                else:
+                    dynamic_safety_margins_to_test = [10 * i for i in range(6)]  # 0%, 10%, 20%, 30%, 40%, 50%
+                all_ds_results = {}
+                all_rs_results = {}  # Reverse dynamic safety
+                all_static_sm_results = {}
+                all_failure_counts_by_ds = {}
+                all_failure_counts_by_rs = {}
+                all_failure_counts_by_static_sm = {}
+                
+                for margin in dynamic_safety_margins_to_test:
+                    all_failure_counts_by_ds[margin] = {round(dl, 4): 0 for dl in deadlines}
+                    all_failure_counts_by_rs[margin] = {round(dl, 4): 0 for dl in deadlines}
+                    all_failure_counts_by_static_sm[margin] = {round(dl, 4): 0 for dl in deadlines}
+                
+                # Oracle tracking
+                all_oracle_scores_ds = []
+                oracle_failure_counts_ds = {round(dl, 4): 0 for dl in deadlines}
+                
+                # Adaptive tracking
+                all_adaptive_results = []
+                # Channel-Aware Adaptive SM tracking
+                all_channel_aware_results = []
+                
+                print(f"Running {num_block_sets} block sets, testing {len(dynamic_safety_margins_to_test)} dynamic safety margins per set...")
+                
+                for ordering in range(num_block_sets):
+                    print(f"\n{'='*60}")
+                    print(f"Block Set {ordering + 1}/{num_block_sets}")
+                    print(f"{'='*60}")
+                    new_blocks = generate_random_blocks(num_blocks)
+                    
+                    # Compute oracle optimal
+                    if noise_type == 1:
+                        oracle_scores_local = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            oracle_scores_local.append(oracle_score)
+                            if oracle_failed:
+                                oracle_failure_counts_ds[round(dl, 4)] += 1
+                        all_oracle_scores_ds.append(np.array(oracle_scores_local))
+                    else:
+                        oracle_iter_list = []
+                        for iteration in range(num_iterations):
+                            oracle_scores_iter = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_oracle_base = np.random.default_rng(seed)
+                                burst_state_shared_o = {"until_next": int(rng_oracle_base.integers(8, 11)), "remaining": 0}
+                                rng_oracle = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_oracle, burst_state=burst_state_shared_o)
+                                else:
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_oracle, burst_state=burst_state_shared_o)
+                                oracle_scores_iter.append(oracle_score)
+                                if oracle_failed:
+                                    oracle_failure_counts_ds[round(dl, 4)] += 1
+                            oracle_iter_list.append(oracle_scores_iter)
+                        all_oracle_scores_ds.append(np.mean(oracle_iter_list, axis=0))
+                    
+                    # Run Adaptive for this block set (once, independent of margins)
+                    if noise_type == 1:
+                        adp_scores = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            adp_scores.append(adp_score)
+                        all_adaptive_results.append(np.array(adp_scores))
+                    else:
+                        adp_scores_list = []
+                        for iteration in range(num_iterations):
+                            adp_scores = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_adp_base = np.random.default_rng(seed)
+                                burst_state_adp = {"until_next": int(rng_adp_base.integers(8, 11)), "remaining": 0}
+                                rng_adp = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_adp, burst_state=burst_state_adp)
+                                else:
+                                    adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_adp, burst_state=burst_state_adp)
+                                adp_scores.append(adp_score)
+                            adp_scores_list.append(adp_scores)
+                        all_adaptive_results.append(np.mean(adp_scores_list, axis=0))
+                    
+                    # Run Channel-Aware Adaptive SM for this block set
+                    ca_expected = 800000 if noise_type == 3 else base_network_speed
+                    if noise_type == 1:
+                        ca_scores = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            ca_score, ca_failed, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, expected_speed=ca_expected)
+                            ca_scores.append(ca_score)
+                        all_channel_aware_results.append(np.array(ca_scores))
+                    else:
+                        ca_scores_list = []
+                        for iteration in range(num_iterations):
+                            ca_scores = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_ca_base = np.random.default_rng(seed)
+                                burst_state_ca = {"until_next": int(rng_ca_base.integers(8, 11)), "remaining": 0}
+                                rng_ca = np.random.default_rng(seed)
+                                if noise_type == 3:
+                                    ca_score, ca_failed, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_ca, burst_state=burst_state_ca, expected_speed=ca_expected)
+                                else:
+                                    ca_score, ca_failed, _ = run_dynamic_iterative_channel_aware_sm(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_ca, burst_state=burst_state_ca, expected_speed=ca_expected)
+                                ca_scores.append(ca_score)
+                            ca_scores_list.append(ca_scores)
+                        all_channel_aware_results.append(np.mean(ca_scores_list, axis=0))
+                    
+                    # Test each base percentage - dynamic AND static for comparison
+                    for current_margin in dynamic_safety_margins_to_test:
+                        print(f"  Dynamic Safety Base: {current_margin}%")
+                        
+                        if current_margin not in all_ds_results:
+                            all_ds_results[current_margin] = []
+                        if current_margin not in all_rs_results:
+                            all_rs_results[current_margin] = []
+                        if current_margin not in all_static_sm_results:
+                            all_static_sm_results[current_margin] = []
+                        
+                        failure_counts_ds = all_failure_counts_by_ds[current_margin]
+                        failure_counts_rs = all_failure_counts_by_rs[current_margin]
+                        failure_counts_static = all_failure_counts_by_static_sm[current_margin]
+                        
+                        if noise_type == 1:
+                            ds_scores = []
+                            rs_scores = []
+                            static_scores = []
+                            for dl_idx, dl in enumerate(deadlines):
+                                ds_score, ds_failed, _ = run_dynamic_iterative_dynamic_safety(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, safety_margin_percent=current_margin)
+                                rs_score, rs_failed, _ = run_dynamic_iterative_reverse_safety(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, safety_margin_percent=current_margin)
+                                static_score, static_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, safety_margin_percent=current_margin)
+                                ds_scores.append(ds_score)
+                                rs_scores.append(rs_score)
+                                static_scores.append(static_score)
+                                dl_rounded = round(dl, 4)
+                                if ds_failed:
+                                    failure_counts_ds[dl_rounded] += 1
+                                if rs_failed:
+                                    failure_counts_rs[dl_rounded] += 1
+                                if static_failed:
+                                    failure_counts_static[dl_rounded] += 1
+                            all_ds_results[current_margin].append(np.array(ds_scores))
+                            all_rs_results[current_margin].append(np.array(rs_scores))
+                            all_static_sm_results[current_margin].append(np.array(static_scores))
+                        else:
+                            ds_scores_list = []
+                            rs_scores_list = []
+                            static_scores_list = []
+                            
+                            for iteration in range(num_iterations):
+                                print(f"    Sub-iteration {iteration + 1}/{num_iterations}...", end="\r")
+                                ds_scores = []
+                                rs_scores = []
+                                static_scores = []
+                                
+                                for dl_idx, dl in enumerate(deadlines):
+                                    seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                    rng_base = np.random.default_rng(seed)
+                                    burst_state_shared = {"until_next": int(rng_base.integers(8, 11)), "remaining": 0}
+                                    
+                                    rng_ds = np.random.default_rng(seed)
+                                    rng_rs = np.random.default_rng(seed)
+                                    rng_static = np.random.default_rng(seed)
+                                    
+                                    if noise_type == 3:
+                                        ds_score, ds_failed, _ = run_dynamic_iterative_dynamic_safety(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_ds, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                        rs_score, rs_failed, _ = run_dynamic_iterative_reverse_safety(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_rs, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                        static_score, static_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_static, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                    else:
+                                        ds_score, ds_failed, _ = run_dynamic_iterative_dynamic_safety(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_ds, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                        rs_score, rs_failed, _ = run_dynamic_iterative_reverse_safety(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_rs, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                        static_score, static_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_static, safety_margin_percent=current_margin, burst_state=burst_state_shared)
+                                    
+                                    ds_scores.append(ds_score)
+                                    rs_scores.append(rs_score)
+                                    static_scores.append(static_score)
+                                    dl_rounded = round(dl, 4)
+                                    if ds_failed:
+                                        failure_counts_ds[dl_rounded] += 1
+                                    if rs_failed:
+                                        failure_counts_rs[dl_rounded] += 1
+                                    if static_failed:
+                                        failure_counts_static[dl_rounded] += 1
+                                
+                                ds_scores_list.append(ds_scores)
+                                rs_scores_list.append(rs_scores)
+                                static_scores_list.append(static_scores)
+                            
+                            all_ds_results[current_margin].append(np.mean(ds_scores_list, axis=0))
+                            all_rs_results[current_margin].append(np.mean(rs_scores_list, axis=0))
+                            all_static_sm_results[current_margin].append(np.mean(static_scores_list, axis=0))
+                            print("    Completed!                  ")
+                
+                # Print failure statistics
+                print("\n" + "="*100)
+                print("FAILURE COUNTS BY DEADLINE (Dynamic Safety Margin Comparison)")
+                print("="*100)
+                for current_margin in sorted(all_failure_counts_by_ds.keys()):
+                    print(f"\nBase Margin: {current_margin}%")
+                    print(f"{'Deadline':<12} {'Decreasing':<12} {'Increasing':<12} {'Static':<10}")
+                    print("-"*46)
+                    fc_ds = all_failure_counts_by_ds[current_margin]
+                    fc_rs = all_failure_counts_by_rs[current_margin]
+                    fc_static = all_failure_counts_by_static_sm[current_margin]
+                    for idx, dl in enumerate(sorted(fc_ds.keys())):
+                        if idx % 5 == 0:
+                            print(f"{dl:<12.4f} {fc_ds[dl]:<12} {fc_rs[dl]:<12} {fc_static[dl]:<10}")
+                print("="*100 + "\n")
+                
+                # Plot: 3 subplots side by side
+                fig, axes = plt.subplots(1, 3, figsize=(28, 7))
+                
+                # Left plot: Decreasing Dynamic Safety Margins (high->low)
+                colors_ds = plt.cm.plasma(np.linspace(0, 1, len(dynamic_safety_margins_to_test)))
+                for idx, margin in enumerate(sorted(all_ds_results.keys())):
+                    scores_list = all_ds_results[margin]
+                    avg_scores = np.mean(scores_list, axis=0)
+                    axes[0].plot(deadlines, avg_scores, label=f"{margin}%", color=colors_ds[idx], linewidth=2)
+                    if show_variance:
+                        std_s = np.std(scores_list, axis=0)
+                        axes[0].fill_between(deadlines, avg_scores - std_s, avg_scores + std_s, color=colors_ds[idx], alpha=0.1)
+                
+                oracle_avg_ds = np.mean(all_oracle_scores_ds, axis=0)
+                channel_aware_avg_subplot = np.mean(all_channel_aware_results, axis=0)
+                axes[0].plot(deadlines, oracle_avg_ds, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                axes[0].plot(deadlines, channel_aware_avg_subplot, label='Channel-Aware', color='red', linewidth=2.5, alpha=0.85)
+                axes[0].set_title(f'Decreasing SM (high\u2192low)\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}')
+                axes[0].set_xlabel('Deadline (seconds)')
+                axes[0].set_ylabel('Total Score')
+                axes[0].legend(loc='best', fontsize=7)
+                axes[0].grid(True, alpha=0.3)
+                
+                # Middle plot: Increasing Reverse Dynamic Safety Margins (low->high)
+                colors_rs = plt.cm.cool(np.linspace(0, 1, len(dynamic_safety_margins_to_test)))
+                for idx, margin in enumerate(sorted(all_rs_results.keys())):
+                    scores_list = all_rs_results[margin]
+                    avg_scores = np.mean(scores_list, axis=0)
+                    axes[1].plot(deadlines, avg_scores, label=f"{margin}%", color=colors_rs[idx], linewidth=2)
+                    if show_variance:
+                        std_s = np.std(scores_list, axis=0)
+                        axes[1].fill_between(deadlines, avg_scores - std_s, avg_scores + std_s, color=colors_rs[idx], alpha=0.1)
+                
+                axes[1].plot(deadlines, oracle_avg_ds, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                axes[1].plot(deadlines, channel_aware_avg_subplot, label='Channel-Aware', color='red', linewidth=2.5, alpha=0.85)
+                axes[1].set_title(f'Increasing SM (low\u2192high)\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}')
+                axes[1].set_xlabel('Deadline (seconds)')
+                axes[1].set_ylabel('Total Score')
+                axes[1].legend(loc='best', fontsize=7)
+                axes[1].grid(True, alpha=0.3)
+                
+                # Right plot: Static Safety Margins (for comparison)
+                colors_static = plt.cm.viridis(np.linspace(0, 1, len(dynamic_safety_margins_to_test)))
+                for idx, margin in enumerate(sorted(all_static_sm_results.keys())):
+                    scores_list = all_static_sm_results[margin]
+                    avg_scores = np.mean(scores_list, axis=0)
+                    axes[2].plot(deadlines, avg_scores, label=f"{margin}%", color=colors_static[idx], linewidth=2)
+                    if show_variance:
+                        std_s = np.std(scores_list, axis=0)
+                        axes[2].fill_between(deadlines, avg_scores - std_s, avg_scores + std_s, color=colors_static[idx], alpha=0.1)
+                
+                axes[2].plot(deadlines, oracle_avg_ds, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                axes[2].plot(deadlines, channel_aware_avg_subplot, label='Channel-Aware', color='red', linewidth=2.5, alpha=0.85)
+                axes[2].set_title(f'Static SM (constant)\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}')
+                axes[2].set_xlabel('Deadline (seconds)')
+                axes[2].set_ylabel('Total Score')
+                axes[2].legend(loc='best', fontsize=7)
+                axes[2].grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                if save_pdf:
+                    pdf_name = f'dynamic_safety_comparison_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                    plt.savefig(pdf_name, bbox_inches='tight')
+                    print(f"Saved: {pdf_name}")
+                plt.show()
+                print("\nDynamic vs Reverse vs Static Safety Margin Comparison displayed.")
+                
+                # --- SUMMARY GRAPH: Best of each strategy + Adaptive + Oracle ---
+                # Find the best margin% for each strategy (highest cumulative avg score)
+                def find_best_margin(results_dict):
+                    best_margin = None
+                    best_total = -1
+                    for margin, scores_list in results_dict.items():
+                        avg_scores = np.mean(scores_list, axis=0)
+                        total = np.sum(avg_scores)
+                        if total > best_total:
+                            best_total = total
+                            best_margin = margin
+                    return best_margin
+                
+                best_ds_margin = find_best_margin(all_ds_results)
+                best_rs_margin = find_best_margin(all_rs_results)
+                best_static_margin = find_best_margin(all_static_sm_results)
+                
+                best_ds_avg = np.mean(all_ds_results[best_ds_margin], axis=0)
+                best_rs_avg = np.mean(all_rs_results[best_rs_margin], axis=0)
+                best_static_avg = np.mean(all_static_sm_results[best_static_margin], axis=0)
+                adaptive_avg = np.mean(all_adaptive_results, axis=0)
+                channel_aware_avg = np.mean(all_channel_aware_results, axis=0)
+                oracle_avg_summary = np.mean(all_oracle_scores_ds, axis=0)
+                
+                print(f"\nBest margins found:")
+                print(f"  Decreasing SM: {best_ds_margin}% (total score: {np.sum(best_ds_avg):.1f})")
+                print(f"  Increasing SM: {best_rs_margin}% (total score: {np.sum(best_rs_avg):.1f})")
+                print(f"  Static SM:     {best_static_margin}% (total score: {np.sum(best_static_avg):.1f})")
+                print(f"  Channel-Aware: (total score: {np.sum(channel_aware_avg):.1f})")
+                print(f"  Adaptive:      (total score: {np.sum(adaptive_avg):.1f})")
+                print(f"  Oracle:        (total score: {np.sum(oracle_avg_summary):.1f})")
+                
+                fig_summary, ax_summary = plt.subplots(1, 1, figsize=(14, 7))
+                ax_summary.plot(deadlines, best_ds_avg, label=f'Best Decreasing SM ({best_ds_margin}%)', color='purple', linewidth=2.5)
+                ax_summary.plot(deadlines, best_rs_avg, label=f'Best Increasing SM ({best_rs_margin}%)', color='cyan', linewidth=2.5)
+                ax_summary.plot(deadlines, best_static_avg, label=f'Best Static SM ({best_static_margin}%)', color='green', linewidth=2.5)
+                ax_summary.plot(deadlines, channel_aware_avg, label='Channel-Aware Adaptive SM', color='red', linewidth=2.5)
+                ax_summary.plot(deadlines, adaptive_avg, label='Pure Adaptive', color='blue', linewidth=2.5, alpha=0.7)
+                ax_summary.plot(deadlines, oracle_avg_summary, label='Oracle (Upper Bound)', color='black', linestyle='--', linewidth=2.5)
+                
+                ax_summary.set_title(f'Summary: Best of Each Strategy\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}')
+                ax_summary.set_xlabel('Deadline (seconds)')
+                ax_summary.set_ylabel('Total Score')
+                ax_summary.legend(loc='best', fontsize=9)
+                ax_summary.grid(True, alpha=0.3)
+                plt.tight_layout()
+                if save_pdf:
+                    pdf_name = f'dynamic_safety_summary_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                    plt.savefig(pdf_name, bbox_inches='tight')
+                    print(f"Saved: {pdf_name}")
+                plt.show()
+                print("Summary graph displayed.")
+                
+                # Failure Rate graph
+                if show_failure_rate:
+                    fig2, axes2 = plt.subplots(1, 3, figsize=(28, 7))
+                    total_runs = num_block_sets * (num_iterations if noise_type != 1 else 1)
+                    
+                    # Left: Decreasing dynamic failure rates
+                    for idx, margin in enumerate(sorted(all_failure_counts_by_ds.keys())):
+                        fc = all_failure_counts_by_ds[margin]
+                        ordered_dl = sorted(fc.keys())
+                        fr = [fc[dl] / total_runs * 100 for dl in ordered_dl]
+                        axes2[0].plot(ordered_dl, fr, label=f"{margin}%", color=colors_ds[idx], linewidth=2, marker='o', markersize=2)
+                    
+                    oracle_ordered_dl = sorted(oracle_failure_counts_ds.keys())
+                    oracle_fr = [oracle_failure_counts_ds[dl] / total_runs * 100 for dl in oracle_ordered_dl]
+                    axes2[0].plot(oracle_ordered_dl, oracle_fr, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                    axes2[0].set_title(f'Decreasing SM - Failure Rate\nNoise: {noise_type}, Blocks: {num_blocks}')
+                    axes2[0].set_xlabel('Deadline (seconds)')
+                    axes2[0].set_ylabel('Failure Rate (%)')
+                    axes2[0].set_ylim([0, 105])
+                    axes2[0].legend(loc='best', fontsize=7)
+                    axes2[0].grid(True, alpha=0.3)
+                    
+                    # Middle: Increasing reverse failure rates
+                    for idx, margin in enumerate(sorted(all_failure_counts_by_rs.keys())):
+                        fc = all_failure_counts_by_rs[margin]
+                        ordered_dl = sorted(fc.keys())
+                        fr = [fc[dl] / total_runs * 100 for dl in ordered_dl]
+                        axes2[1].plot(ordered_dl, fr, label=f"{margin}%", color=colors_rs[idx], linewidth=2, marker='o', markersize=2)
+                    
+                    axes2[1].plot(oracle_ordered_dl, oracle_fr, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                    axes2[1].set_title(f'Increasing SM - Failure Rate\nNoise: {noise_type}, Blocks: {num_blocks}')
+                    axes2[1].set_xlabel('Deadline (seconds)')
+                    axes2[1].set_ylabel('Failure Rate (%)')
+                    axes2[1].set_ylim([0, 105])
+                    axes2[1].legend(loc='best', fontsize=7)
+                    axes2[1].grid(True, alpha=0.3)
+                    
+                    # Right: Static failure rates
+                    for idx, margin in enumerate(sorted(all_failure_counts_by_static_sm.keys())):
+                        fc = all_failure_counts_by_static_sm[margin]
+                        ordered_dl = sorted(fc.keys())
+                        fr = [fc[dl] / total_runs * 100 for dl in ordered_dl]
+                        axes2[2].plot(ordered_dl, fr, label=f"{margin}%", color=colors_static[idx], linewidth=2, marker='o', markersize=2)
+                    
+                    axes2[2].plot(oracle_ordered_dl, oracle_fr, label='Oracle', color='black', linestyle='--', linewidth=2.5)
+                    axes2[2].set_title(f'Static SM - Failure Rate\nNoise: {noise_type}, Blocks: {num_blocks}')
+                    axes2[2].set_xlabel('Deadline (seconds)')
+                    axes2[2].set_ylabel('Failure Rate (%)')
+                    axes2[2].set_ylim([0, 105])
+                    axes2[2].legend(loc='best', fontsize=7)
+                    axes2[2].grid(True, alpha=0.3)
+                    
+                    plt.tight_layout()
+                    if save_pdf:
+                        pdf_name = f'dynamic_safety_failure_rate_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}.pdf'
+                        plt.savefig(pdf_name, bbox_inches='tight')
+                        print(f"Saved: {pdf_name}")
+                    plt.show()
+                    print("Failure Rate comparison displayed.")
+            
+            # Initialize failure counts (used by both modes)
+            failure_counts_adaptive = {round(dl, 4): 0 for dl in deadlines}
+            failure_counts_iterative = {round(dl, 4): 0 for dl in deadlines}
+            failure_counts_iterative_ma = {round(dl, 4): 0 for dl in deadlines}
+            failure_counts_iterative_sm = {round(dl, 4): 0 for dl in deadlines}
+            failure_counts_oracle = {round(dl, 4): 0 for dl in deadlines}
+            
+            if not compare_safety_margins and not compare_ma_windows and not compare_dynamic_safety and not compare_channel_aware:
+                # Normal mode: compare 4 algorithms with single safety margin
+                # Normal mode: test multiple random block sets
+                print(f"Running {num_block_sets} block sets, {num_iterations} iterations per set...")
+                all_adaptive_scores = []
+                all_iterative_scores = []
+                all_iterative_ma_scores = []
+                all_iterative_sm_scores = []
+                all_oracle_scores = []
+                
+                for ordering in range(num_block_sets):
+                    print(f"\nBlock Set {ordering + 1}/{num_block_sets}:")
+                    # Generate completely new random blocks (once per iteration)
+                    new_blocks = generate_random_blocks(num_blocks)
+                    
+                    if noise_type == 1:
+                        adp_scores = []
+                        iter_scores = []
+                        iter_ma_scores = []
+                        iter_sm_scores = []
+                        oracle_scores = []
+                        for dl_idx, dl in enumerate(deadlines):
+                            # No randomness needed - deterministic execution
+                            adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            iter_score, iter_failed, _ = run_dynamic_iterative(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, window_size=ma_window_size)
+                            iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed, safety_margin_percent=safety_margin_percent)
+                            oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, base_speed=base_network_speed)
+                            adp_scores.append(adp_score)
+                            iter_scores.append(iter_score)
+                            iter_ma_scores.append(iter_ma_score)
+                            iter_sm_scores.append(iter_sm_score)
+                            oracle_scores.append(oracle_score)
+                            dl_rounded = round(dl, 4)
+                            if adp_failed:
+                                failure_counts_adaptive[dl_rounded] += 1
+                            if iter_failed:
+                                failure_counts_iterative[dl_rounded] += 1
+                            if iter_ma_failed:
+                                failure_counts_iterative_ma[dl_rounded] += 1
+                            if iter_sm_failed:
+                                failure_counts_iterative_sm[dl_rounded] += 1
+                            if oracle_failed:
+                                failure_counts_oracle[dl_rounded] += 1
+                        all_adaptive_scores.append(adp_scores)
+                        all_iterative_scores.append(iter_scores)
+                        all_iterative_ma_scores.append(iter_ma_scores)
+                        all_iterative_sm_scores.append(iter_sm_scores)
+                        all_oracle_scores.append(oracle_scores)
+                    else:
+                        adp_scores_list = []
+                        iter_scores_list = []
+                        iter_ma_scores_list = []
+                        iter_sm_scores_list = []
+                        oracle_scores_list = []
+                        
+                        for iteration in range(num_iterations):
+                            print(f"  Sub-iteration {iteration + 1}/{num_iterations}...", end="\r")
+                            adp_scores = []
+                            iter_scores = []
+                            iter_ma_scores = []
+                            iter_sm_scores = []
+                            oracle_scores = []
+                            
+                            for dl_idx, dl in enumerate(deadlines):
+                                seed = int((dl_idx * 12345 + iteration * 54321) % (2**31))
+                                rng_shared = np.random.default_rng(seed)
+                                burst_state_shared = {"until_next": int(rng_shared.integers(8, 11)), "remaining": 0}
+                                
+                                rng_shared1 = np.random.default_rng(seed)
+                                rng_shared2 = np.random.default_rng(seed)
+                                rng_shared3 = np.random.default_rng(seed)
+                                rng_shared4 = np.random.default_rng(seed)
+                                rng_oracle = np.random.default_rng(seed)
+                                
+                                if noise_type == 3:
+                                    adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_shared1, burst_state=burst_state_shared)
+                                    iter_score, iter_failed, _ = run_dynamic_iterative(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_shared2, burst_state=burst_state_shared)
+                                    iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_shared3, window_size=ma_window_size, burst_state=burst_state_shared)
+                                    iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_shared4, safety_margin_percent=safety_margin_percent, burst_state=burst_state_shared)
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_oracle, burst_state=burst_state_shared)
+                                else:
+                                    adp_score, adp_failed, _ = run_adaptive(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_shared1, burst_state=burst_state_shared)
+                                    iter_score, iter_failed, _ = run_dynamic_iterative(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_shared2, burst_state=burst_state_shared)
+                                    iter_ma_score, iter_ma_failed, _ = run_dynamic_iterative_moving_avg(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_shared3, window_size=ma_window_size, burst_state=burst_state_shared)
+                                    iter_sm_score, iter_sm_failed, _ = run_dynamic_iterative_safety_margin(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_shared4, safety_margin_percent=safety_margin_percent, burst_state=burst_state_shared)
+                                    oracle_score, oracle_failed, _ = run_oracle_optimal(new_blocks, dl, sizes, accuracies, variable_speed=True, base_speed=base_network_speed, rng=rng_oracle, burst_state=burst_state_shared)
+                                
+                                adp_scores.append(adp_score)
+                                iter_scores.append(iter_score)
+                                iter_ma_scores.append(iter_ma_score)
+                                iter_sm_scores.append(iter_sm_score)
+                                oracle_scores.append(oracle_score)
+                                dl_rounded = round(dl, 4)
+                                if adp_failed:
+                                    failure_counts_adaptive[dl_rounded] += 1
+                                if iter_failed:
+                                    failure_counts_iterative[dl_rounded] += 1
+                                if iter_ma_failed:
+                                    failure_counts_iterative_ma[dl_rounded] += 1
+                                if iter_sm_failed:
+                                    failure_counts_iterative_sm[dl_rounded] += 1
+                                if oracle_failed:
+                                    failure_counts_oracle[dl_rounded] += 1
+                            
+                            adp_scores_list.append(adp_scores)
+                            iter_scores_list.append(iter_scores)
+                            iter_ma_scores_list.append(iter_ma_scores)
+                            iter_sm_scores_list.append(iter_sm_scores)
+                            oracle_scores_list.append(oracle_scores)
+                        
+                        all_adaptive_scores.append(np.mean(adp_scores_list, axis=0))
+                        all_iterative_scores.append(np.mean(iter_scores_list, axis=0))
+                        all_iterative_ma_scores.append(np.mean(iter_ma_scores_list, axis=0))
+                        all_iterative_sm_scores.append(np.mean(iter_sm_scores_list, axis=0))
+                        all_oracle_scores.append(np.mean(oracle_scores_list, axis=0))
+                        print("  Completed!                  ")
+                
+                # Average across all iterations
+                adaptive_scores = np.mean(all_adaptive_scores, axis=0)
+                iterative_scores = np.mean(all_iterative_scores, axis=0)
+                iterative_ma_scores = np.mean(all_iterative_ma_scores, axis=0)
+                iterative_sm_scores = np.mean(all_iterative_sm_scores, axis=0)
+                
+                # Compute standard deviations for variance bands
+                adaptive_std = np.std(all_adaptive_scores, axis=0)
+                iterative_std = np.std(all_iterative_scores, axis=0)
+                iterative_ma_std = np.std(all_iterative_ma_scores, axis=0)
+                iterative_sm_std = np.std(all_iterative_sm_scores, axis=0)
+                oracle_std = np.std(all_oracle_scores, axis=0)
+                
+                # For minmax mode, compute min/max
+                adaptive_min = np.min(all_adaptive_scores, axis=0)
+                adaptive_max = np.max(all_adaptive_scores, axis=0)
+                iterative_min = np.min(all_iterative_scores, axis=0)
+                iterative_max = np.max(all_iterative_scores, axis=0)
+                iterative_ma_min = np.min(all_iterative_ma_scores, axis=0)
+                iterative_ma_max = np.max(all_iterative_ma_scores, axis=0)
+                iterative_sm_min = np.min(all_iterative_sm_scores, axis=0)
+                iterative_sm_max = np.max(all_iterative_sm_scores, axis=0)
+                oracle_min = np.min(all_oracle_scores, axis=0)
+                oracle_max = np.max(all_oracle_scores, axis=0)
+                
+                # Compute oracle average
+                oracle_scores = np.mean(all_oracle_scores, axis=0)
+
+                plt.figure(figsize=(12, 6))
+                plt.plot(deadlines, adaptive_scores, label='Pure Adaptive', color='blue', alpha=0.5)
+                if show_variance:
+                    if variance_display == "minmax":
+                        plt.fill_between(deadlines, adaptive_min, adaptive_max, color='blue', alpha=0.1)
+                    else:
+                        plot_variance(deadlines, adaptive_scores, adaptive_std, 'blue', variance_display)
+                
+                plt.plot(deadlines, iterative_scores, label='Dynamic Iterative (Baseline)', color='green', linewidth=2)
+                if show_variance:
+                    if variance_display == "minmax":
+                        plt.fill_between(deadlines, iterative_min, iterative_max, color='green', alpha=0.15)
+                    else:
+                        plot_variance(deadlines, iterative_scores, iterative_std, 'green', variance_display)
+                
+                plt.plot(deadlines, iterative_ma_scores, label='Dynamic Iterative (Moving Avg)', color='orange', linewidth=2)
+                if show_variance:
+                    if variance_display == "minmax":
+                        plt.fill_between(deadlines, iterative_ma_min, iterative_ma_max, color='orange', alpha=0.15)
+                    else:
+                        plot_variance(deadlines, iterative_ma_scores, iterative_ma_std, 'orange', variance_display)
+                
+                plt.plot(deadlines, iterative_sm_scores, label='Dynamic Iterative (Safety Margin)', color='red', linewidth=2)
+                if show_variance:
+                    if variance_display == "minmax":
+                        plt.fill_between(deadlines, iterative_sm_min, iterative_sm_max, color='red', alpha=0.15)
+                    else:
+                        plot_variance(deadlines, iterative_sm_scores, iterative_sm_std, 'red', variance_display)
+                
+                # Oracle optimal line (black dashed)
+                plt.plot(deadlines, oracle_scores, label='Optimal (Oracle)', color='black', linestyle='--', linewidth=2.5)
+                if show_variance:
+                    if variance_display == "minmax":
+                        plt.fill_between(deadlines, oracle_min, oracle_max, color='black', alpha=0.1)
+                    else:
+                        plot_variance(deadlines, oracle_scores, oracle_std, 'black', variance_display)
+                
+                noise_label = "(with Gaussian Noise)" if noise_type == 2 else ""
+                plt.title(f'Real-Time Accuracy Score vs. Deadline {noise_label}\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iter: {num_iterations}, MA-Window: {ma_window_size}, SM: {safety_margin_percent}%, Variance: {variance_display}')
+                plt.tight_layout()
+                plt.xlabel('Deadline (seconds)')
+                plt.ylabel('Total Score')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                
+                # --- FAILURE RATE GRAPH (Alternative view: % algorithms that failed) ---
+                if show_failure_rate:
+                    plt.figure(figsize=(12, 6))
+                    
+                    # Calculate failure rate for each algorithm at each deadline
+                    total_runs_per_deadline = num_block_sets * (num_iterations if noise_type != 1 else 1)
+                    
+                    adaptive_failure_rate = [failure_counts_adaptive[dl] / total_runs_per_deadline * 100 for dl in sorted(failure_counts_adaptive.keys())]
+                    iterative_failure_rate = [failure_counts_iterative[dl] / total_runs_per_deadline * 100 for dl in sorted(failure_counts_iterative.keys())]
+                    iterative_ma_failure_rate = [failure_counts_iterative_ma[dl] / total_runs_per_deadline * 100 for dl in sorted(failure_counts_iterative_ma.keys())]
+                    iterative_sm_failure_rate = [failure_counts_iterative_sm[dl] / total_runs_per_deadline * 100 for dl in sorted(failure_counts_iterative_sm.keys())]
+                    
+                    ordered_deadlines = sorted(failure_counts_adaptive.keys())
+                    
+                    plt.plot(ordered_deadlines, adaptive_failure_rate, label='Pure Adaptive', color='blue', alpha=0.5, marker='o', markersize=4, linewidth=2)
+                    plt.plot(ordered_deadlines, iterative_failure_rate, label='Dynamic Iterative (Baseline)', color='green', marker='s', markersize=4, linewidth=2)
+                    plt.plot(ordered_deadlines, iterative_ma_failure_rate, label='Dynamic Iterative (Moving Avg)', color='orange', marker='^', markersize=4, linewidth=2)
+                    plt.plot(ordered_deadlines, iterative_sm_failure_rate, label='Dynamic Iterative (Safety Margin)', color='red', marker='d', markersize=4, linewidth=2)
+                    
+                    # Oracle failure rate
+                    oracle_failure_rate = [failure_counts_oracle[dl] / total_runs_per_deadline * 100 for dl in sorted(failure_counts_oracle.keys())]
+                    plt.plot(ordered_deadlines, oracle_failure_rate, label='Optimal (Oracle)', color='black', linestyle='--', marker='x', markersize=4, linewidth=2.5)
+                    
+                    plt.title(f'Algorithm Failure Rate vs. Deadline\nNoise: {noise_type}, Blocks: {num_blocks}, Sets: {num_block_sets}, Iterations: {num_iterations}')
+                    plt.xlabel('Deadline (seconds)')
+                    plt.ylabel('Failure Rate (%)')
+                    plt.ylim([0, 105])
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+                    plt.tight_layout()
+        if trace_deadline is None:
+            specific_deadline = (deadline_start + deadline_end) / 2  # Use middle of range
+        else:
+            # Find the closest deadline in the deadlines array when available
+            if deadlines is None:
+                specific_deadline = trace_deadline
+                print(f"\nRequested trace_deadline: {trace_deadline}s")
+                print(f"Using exact deadline (no evaluation range to search)\n")
+            else:
+                specific_deadline = min(deadlines, key=lambda x: abs(x - trace_deadline))
+                print(f"\nRequested trace_deadline: {trace_deadline}s")
+                print(f"Closest deadline in evaluation: {specific_deadline}s\n")
+        
+        # Generate new blocks for trace
+        trace_blocks = generate_random_blocks(num_blocks)
+        
+        if noise_type == 1:
+            score_adp, hist_adp, _ = run_adaptive(trace_blocks, specific_deadline, sizes, accuracies, log=True, base_speed=base_network_speed)
+            score_ite, hist_ite, _ = run_dynamic_iterative(trace_blocks, specific_deadline, sizes, accuracies, log=True, base_speed=base_network_speed)
+        elif noise_type == 3:
+            # Deterministic seed for reproducible trace with noise
+            seed = 42
+            rng_trace1 = np.random.default_rng(seed)
+            rng_trace2 = np.random.default_rng(seed)
+            burst_state_trace = {"until_next": int(rng_trace1.integers(8, 11)), "remaining": 0}
+            
+            score_adp, hist_adp, _ = run_adaptive(trace_blocks, specific_deadline, sizes, accuracies, log=True, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_trace1, burst_state=burst_state_trace)
+            score_ite, hist_ite, _ = run_dynamic_iterative(trace_blocks, specific_deadline, sizes, accuracies, log=True, variable_speed=True, base_speed=base_network_speed, speed_model="bursty", rng=rng_trace2, burst_state=burst_state_trace)
+        else:
+            # Deterministic seed for reproducible trace with noise
+            seed = 42
+            rng_trace1 = np.random.default_rng(seed)
+            rng_trace2 = np.random.default_rng(seed)
+            burst_state_trace = {"until_next": int(rng_trace1.integers(8, 11)), "remaining": 0}
+            
+            score_adp, hist_adp, _ = run_adaptive(trace_blocks, specific_deadline, sizes, accuracies, log=True, variable_speed=True, base_speed=base_network_speed, rng=rng_trace1, burst_state=burst_state_trace)
+            score_ite, hist_ite, _ = run_dynamic_iterative(trace_blocks, specific_deadline, sizes, accuracies, log=True, variable_speed=True, base_speed=base_network_speed, rng=rng_trace2, burst_state=burst_state_trace)
+
+        # Print detailed trace
+        print("\n" + "="*80)
+        print(f"REAL DATA TRACE (Deadline: {specific_deadline}s)")
+        print("="*80)
+        
+        print("\nAPPROACH: Pure Adaptive")
+        print(f"Status: {'SUCCESS' if score_adp > 0 else 'FAILED'}")
+        print(f"Sequence: {' -> '.join(hist_adp)}")
+        print(f"Final Score: {score_adp}")
+        
+        print("\nAPPROACH: Dynamic Iterative")
+        print(f"Status: {'SUCCESS' if score_ite > 0 else 'FAILED'}")
+        print(f"Sequence: {' -> '.join(hist_ite)}")
+        print(f"Final Score: {score_ite}")
+        print("="*80 + "\n")
+
+        if not log_only and not compare_safety_margins:
+            # Print failure statistics BEFORE showing the plot (only for normal mode)
+            print("\n" + "="*100)
+            print("FAILURE COUNTS BY DEADLINE")
+            print("="*100)
+            print(f"{'Deadline':<12} {'Adaptive':<18} {'Iter (Base)':<18} {'Iter (MA)':<18} {'Iter (SM)':<18} {'Oracle':<18}")
+            print("-"*118)
+            for idx, dl in enumerate(sorted(failure_counts_adaptive.keys())):
+                if idx % 5 == 0:  # Print every 5th deadline
+                    print(f"{dl:<12.4f} {failure_counts_adaptive[dl]:<18} {failure_counts_iterative[dl]:<18} {failure_counts_iterative_ma[dl]:<18} {failure_counts_iterative_sm[dl]:<18} {failure_counts_oracle[dl]:<18}")
+            print("="*118 + "\n")
+
+            # Save PDFs if enabled
+            if save_pdf:
+                # Save all open figures
+                suffix = f'_n{noise_type}_b{num_blocks}_s{num_block_sets}_i{num_iterations}'
+                fig_names = ['normal_score', 'normal_failure_rate']
+                for i, fig_num in enumerate(plt.get_fignums()):
+                    fig = plt.figure(fig_num)
+                    label = fig_names[i] if i < len(fig_names) else f'normal_graph_{i+1}'
+                    name = f'{label}{suffix}.pdf'
+                    fig.savefig(name, bbox_inches='tight')
+                    print(f"Saved: {name}")
+            
+            # Use non-blocking show
+            plt.ion()
+            plt.show(block=False)
+            print("Plot displayed. Close the window to exit or press CTRL+C to stop.")
+            
+            import time
+            try:
+                while True:
+                    plt.pause(0.1)
+            except KeyboardInterrupt:
+                signal_handler(None, None)
+        
+    except KeyboardInterrupt:
+        print("\n\nExecution stopped by user (CTRL+C)")
+        return
+    except Exception as e:
+        print(f"\nError: {e}")
+        return
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-"""
-    print("\n" + "="*50)
-    print(f"REAL DATA TRACE (Deadline: {specific_deadline}s)")
-    print("="*50)
-    print(f"APPROACH: Pure Adaptive")
-    print(f"Status: {'SUCCESS' if score_adp > 0 else 'FAILED'}")
-    print(f"Sequence: {' -> '.join(hist_adp) if hist_adp != 'FAILED' else 'N/A'}")
-    print(f"Final Score: {score_adp}")
-    print("-" * 50)
-    print(f"APPROACH: Dynamic Iterative")
-    print(f"Status: {'SUCCESS' if score_ite > 0 else 'FAILED'}")
-    print(f"Sequence: {' -> '.join(hist_ite) if hist_ite != 'FAILED' else 'N/A'}")
-    print(f"Final Score: {score_ite}")
-    print("="*50)
-"""
