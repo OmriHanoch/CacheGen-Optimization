@@ -1,0 +1,110 @@
+### Algorithm: Hindsight Optimal (Oracle)
+
+**Input:** List of blocks with importance, user deadline, channel speeds (pre-known).
+
+1.  **Initialize Pareto Front:** `ParetoFront = [(time: 0, score: 0)]` 
+    *(Each point represents an optimal path found so far)*
+
+2.  **For each Block in session:**
+    a. Create an empty list: `NewCandidates = []`
+    b. **For each Point (t, s) in current ParetoFront:**
+        i. **For each Quality Level (1, 2, 3):**
+           - Calculate `tx_time` for this block at this specific time `t` using known channel states.
+           - `new_t = t + tx_time`
+           - `new_s = s + (block.importance * level_accuracy)`
+           - If `new_t <= user_deadline`: 
+             Add `(new_t, new_s)` to `NewCandidates`.
+
+3.  **Pruning (Keep only Pareto-Optimal points):**
+    a. Sort `NewCandidates` by `time` (ascending).
+    b. Iterate through sorted candidates:
+       - Keep a candidate only if its `score` is strictly higher than the highest score seen so far for a shorter time.
+    c. Update `ParetoFront = PrunedCandidates`.
+
+4.  **Final Decision:**
+    - If `ParetoFront` is empty: Return **Failure** (Deadline impossible to meet).
+    - Otherwise: Return the **Maximum Score** found in the final front.
+
+**Result:** The highest possible accuracy score that could have been achieved given the specific network conditions.
+
+
+### Algorithm: Layered Scalable Transmission
+
+**Input:** List of blocks with importance, user deadline, decode time per block, upgrade penalty.
+
+1.  **Initialization:**
+    - `decode_reserve = total_blocks * decode_time_per_block`
+    - `soft_deadline = user_deadline - decode_reserve`
+    - `elapsed_time = 0`
+    - Set all blocks to `Level 1`.
+
+2.  **Phase 1: Base Layer Transmission**
+    - **For each block** in session:
+        - Transmit `Size(Level 1)` bits.
+        - Update `elapsed_time` based on actual channel speed.
+        - Measure new `channel_speed`.
+
+3.  **Phase 2: Greedy Quality Upgrades**
+    - If `elapsed_time < soft_deadline`:
+        - Sort blocks by **Importance** (Highest first).
+        - **For each block** in sorted list:
+            - If `elapsed_time >= soft_deadline`: **Break** (Stop upgrades).
+            - **Try Upgrade to Level 3:**
+                - `delta_bits = (Size(L3) - Size(L1)) * (1 + penalty)`
+                - Calculate `tx_time` for `delta_bits`.
+                - If `elapsed_time + tx_time <= soft_deadline`:
+                    - Transmit delta, Update `elapsed_time`, Set block to `Level 3`.
+                    - Continue to next block.
+            - **Try Upgrade to Level 2:** (Only if L3 failed)
+                - `delta_bits = (Size(L2) - Size(L1)) * (1 + penalty)`
+                - Calculate `tx_time` for `delta_bits`.
+                - If `elapsed_time + tx_time <= soft_deadline`:
+                    - Transmit delta, Update `elapsed_time`, Set block to `Level 2`.
+
+4.  **Final Calculation:**
+    - `total_time = elapsed_time + decode_reserve`
+    - If `total_time > user_deadline`: Return **Failure** (Score = 0).
+    - Else: Return **Total Score** based on final achieved levels.
+
+
+
+### Algorithm: Channel-Aware Dynamic Inference
+
+**Input:** List of blocks, user deadline, MA window size, min/max Safety Margin (SM).
+
+1.  **Initialization:**
+    - `elapsed_time = 0`
+    - `speed_history = [base_speed] * window_size`
+    - `current_speed = base_speed`
+
+2.  **For each Block in session:**
+    a. **Predict Channel Capacity:**
+       - `ma_speed = average(speed_history)`
+       - `planning_speed = min(current_speed, ma_speed)` *(Conservative approach)*
+
+    b. **Assess Deadline Pressure (Slack):**
+       - `time_left = user_deadline - elapsed_time`
+       - `blocks_remaining = total_blocks - current_index`
+       - `min_time_needed = (blocks_remaining * Size(Level 1)) / planning_speed`
+       - `slack = time_left - min_time_needed`
+       - `slack_ratio = clamp(slack / time_left, 0, 1)`
+
+    c. **Determine Adaptive Safety Margin:**
+       - `current_sm = min_sm + (max_sm - min_sm) * (1.0 - slack_ratio)`
+       *(Note: If slack is 0, SM becomes max_sm (90%). If slack is high, SM stays near min_sm)*
+
+    d. **Plan & Optimize:**
+       - `safe_time_budget = time_left * (1.0 - current_sm)`
+       - `chosen_level = optimize_quality(remaining_blocks, safe_time_budget, planning_speed)`
+
+    e. **Transmit & Execute:**
+       - Transmit `chosen_level`, update `elapsed_time` based on actual channel speed.
+       - Update `total_score += importance * level_accuracy`.
+
+    f. **Learn:**
+       - Measure actual `current_speed` from the last transmission.
+       - Update `speed_history` (Slide window).
+
+3.  **Final Result:**
+    - If `elapsed_time > user_deadline`: Return **Failure** (Score = 0).
+    - Else: Return **Total Score**.
